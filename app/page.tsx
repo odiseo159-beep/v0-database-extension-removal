@@ -7,21 +7,7 @@ import Image from "next/image"
 import { Modal } from "@/components/modal"
 import { EmojiPicker } from "@/components/emoji-picker"
 import { useToast } from "@/hooks/use-toast"
-
-type Message = {
-  id: string
-  username: string
-  user_color: string
-  message: string
-  created_at: string
-  room: string
-}
-
-type TypingIndicator = {
-  username: string
-  user_color: string
-  updated_at?: string
-}
+import { supabase, type Message, type TypingIndicator } from "@/lib/supabase/client"
 
 const EMOJI_SHORTCUTS: Record<string, string> = {
   ":rocket:": "🚀",
@@ -97,523 +83,441 @@ export default function ForssengerPage() {
   const [typingUsers, setTypingUsers] = useState<TypingIndicator[]>([])
   const [showEmojiPicker, setShowEmojiPicker] = useState(false)
   const [isNudging, setIsNudging] = useState(false)
-  const [inMemoryMessages, setInMemoryMessages] = useState<Record<string, Message[]>>({
-    lobby: [],
-    bnb: [],
-    usa: [],
-    dev: [],
-  })
-
-  const [inviteModalOpen, setInviteModalOpen] = useState(false)
-  const [filesModalOpen, setFilesModalOpen] = useState(false)
-  const [activitiesModalOpen, setActivitiesModalOpen] = useState(false)
-  const [webcamModalOpen, setWebcamModalOpen] = useState(false)
-  const [callModalOpen, setCallModalOpen] = useState(false)
-  const [addContactModalOpen, setAddContactModalOpen] = useState(false)
-  const [settingsModalOpen, setSettingsModalOpen] = useState(false)
-  const [modalLoading, setModalLoading] = useState(false)
-
-  const { toast } = useToast()
-  const typingTimeoutRef = useRef<NodeJS.Timeout>()
-  const lastMessageTimeRef = useRef<number[]>([])
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const typingTimeoutRef = useRef<NodeJS.Timeout>()
+  const { toast } = useToast()
+  const [showUsernameModal, setShowUsernameModal] = useState(true)
+  const [tempUsername, setTempUsername] = useState("")
 
+  // Generate random username and color on mount
   useEffect(() => {
     const randomName = CRYPTO_MEME_NAMES[Math.floor(Math.random() * CRYPTO_MEME_NAMES.length)]
-    const randomNum = Math.floor(Math.random() * 10000)
-    const randomColor = `#${Math.floor(Math.random() * 16777215)
-      .toString(16)
-      .padStart(6, "0")}`
-    setUsername(`${randomName}${randomNum}`)
+    const randomColor = `#${Math.floor(Math.random() * 16777215).toString(16)}`
+    setTempUsername(randomName)
     setUserColor(randomColor)
   }, [])
 
+  // Fetch initial messages
   useEffect(() => {
-    setMessages(inMemoryMessages[currentRoom] || [])
-  }, [currentRoom, inMemoryMessages])
+    if (!username) return
 
+    const fetchMessages = async () => {
+      const { data, error } = await supabase
+        .from("messages")
+        .select("*")
+        .eq("room", currentRoom)
+        .order("created_at", { ascending: true })
+        .limit(100)
+
+      if (error) {
+        console.error("Error fetching messages:", error)
+        return
+      }
+
+      if (data) {
+        setMessages(data)
+      }
+    }
+
+    fetchMessages()
+  }, [username, currentRoom])
+
+  // Subscribe to new messages
+  useEffect(() => {
+    if (!username) return
+
+    const channel = supabase
+      .channel(`room:${currentRoom}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "messages",
+          filter: `room=eq.${currentRoom}`,
+        },
+        (payload) => {
+          const newMessage = payload.new as Message
+          setMessages((prev) => [...prev, newMessage])
+        }
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [username, currentRoom])
+
+  // Subscribe to typing indicators
+  useEffect(() => {
+    if (!username) return
+
+    const fetchTypingUsers = async () => {
+      const { data } = await supabase
+        .from("typing_indicators")
+        .select("*")
+        .eq("room", currentRoom)
+        .neq("username", username)
+
+      if (data) {
+        setTypingUsers(data)
+      }
+    }
+
+    fetchTypingUsers()
+
+    const channel = supabase
+      .channel(`typing:${currentRoom}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "typing_indicators",
+          filter: `room=eq.${currentRoom}`,
+        },
+        () => {
+          fetchTypingUsers()
+        }
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [username, currentRoom])
+
+  // Auto-scroll to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [messages])
 
-  const checkRateLimit = useCallback(() => {
-    const now = Date.now()
-    const recentMessages = lastMessageTimeRef.current.filter((time) => now - time < 5000)
+  // Update typing indicator
+  const updateTypingIndicator = useCallback(async () => {
+    if (!username) return
 
-    if (recentMessages.length >= 3) {
-      toast({
-        title: "Slow down!",
-        description: "You're sending messages too quickly. Please wait a moment.",
-        variant: "destructive",
-      })
-      return false
+    await supabase.from("typing_indicators").upsert(
+      {
+        room: currentRoom,
+        username,
+        user_color: userColor,
+        updated_at: new Date().toISOString(),
+      },
+      {
+        onConflict: "room,username",
+      }
+    )
+
+    if (typingTimeoutRef.current) {
+      clearTimeout(typingTimeoutRef.current)
     }
 
-    lastMessageTimeRef.current = [...recentMessages, now]
-    return true
-  }, [toast])
+    typingTimeoutRef.current = setTimeout(async () => {
+      await supabase.from("typing_indicators").delete().eq("room", currentRoom).eq("username", username)
+    }, 3000)
+  }, [username, currentRoom, userColor])
 
-  const handleSend = async () => {
+  const handleSendMessage = async () => {
     if (!message.trim() || !username) return
-    if (!checkRateLimit()) return
 
     const processedMessage = replaceEmojiShortcuts(filterProfanity(message.trim()))
 
-    const newMessage: Message = {
-      id: `${Date.now()}-${Math.random()}`,
+    await supabase.from("messages").insert({
       room: currentRoom,
       username,
       user_color: userColor,
       message: processedMessage,
-      created_at: new Date().toISOString(),
-    }
+    })
 
-    setInMemoryMessages((prev) => ({
-      ...prev,
-      [currentRoom]: [...(prev[currentRoom] || []), newMessage],
-    }))
+    // Remove typing indicator
+    await supabase.from("typing_indicators").delete().eq("room", currentRoom).eq("username", username)
+
     setMessage("")
+    if (typingTimeoutRef.current) {
+      clearTimeout(typingTimeoutRef.current)
+    }
   }
 
   const handleNudge = () => {
+    if (isNudging) return
+
     setIsNudging(true)
-    setTimeout(() => setIsNudging(false), 500)
     toast({
-      title: "Nudge!",
-      description: "You sent a nudge to the chat room!",
+      title: "Nudge sent! 👋",
+      description: "Everyone in the room has been nudged!",
     })
+
+    setTimeout(() => {
+      setIsNudging(false)
+    }, 5000)
   }
 
-  const handleFakeAction = async (actionName: string) => {
-    setModalLoading(true)
-    await new Promise((resolve) => setTimeout(resolve, 1500))
-    setModalLoading(false)
-    toast({
-      title: "Success!",
-      description: `${actionName} completed successfully.`,
-    })
-    // Close all modals
-    setInviteModalOpen(false)
-    setFilesModalOpen(false)
-    setActivitiesModalOpen(false)
-    setWebcamModalOpen(false)
-    setCallModalOpen(false)
-    setAddContactModalOpen(false)
-    setSettingsModalOpen(false)
-  }
-
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.ctrlKey && e.key === "i") {
-        e.preventDefault()
-        setInviteModalOpen(true)
-      }
-      if (e.ctrlKey && e.key === "f") {
-        e.preventDefault()
-        setFilesModalOpen(true)
-      }
-      if (e.ctrlKey && e.key === "n") {
-        e.preventDefault()
-        handleNudge()
-      }
-    }
-
-    document.addEventListener("keydown", handleKeyDown)
-    return () => document.removeEventListener("keydown", handleKeyDown)
-  }, [])
-
-  const contactGroups = [
-    {
-      label: "Online (6)",
-      contacts: [
-        { name: "CZ (Binance)", status: "online", message: "Building quietly. BUIDL 🧱", avatar: "/avatars/cz.png" },
-        { name: "Elon Musk", status: "online", message: "Sending memes to Mars 🚀", avatar: "/avatars/elon.png" },
-        {
-          name: "Vitalik Buterin",
-          status: "online",
-          message: "Thinking in quadratic funding",
-          avatar: "/avatars/vitalik.png",
-        },
-        { name: "Nayib Bukele", status: "online", message: "Volcano node is warm 🌋", avatar: "/avatars/bukele.png" },
-        {
-          name: "Brian Armstrong",
-          status: "online",
-          message: "On-ramping humans → crypto",
-          avatar: "/avatars/brian.png",
-        },
-        { name: "Balaji S.", status: "online", message: "Network state musings", avatar: "/avatars/balaji.png" },
-      ],
-    },
-    {
-      label: "Away (4)",
-      contacts: [
-        { name: "Donald Trump", status: "away", message: "BRB, posting on X", avatar: "/avatars/trump.png" },
-        { name: "Joe Biden", status: "away", message: "In a briefing…", avatar: "/avatars/biden.png" },
-        { name: "Jack Dorsey", status: "away", message: "Decentralize all the things", avatar: "/avatars/dorsey.png" },
-        { name: "Michael Saylor", status: "away", message: "Energy for sound money ⚡", avatar: "/avatars/saylor.png" },
-      ],
-    },
-    {
-      label: "Busy (4)",
-      contacts: [
-        { name: "Janet Yellen", status: "busy", message: "Macro meeting in progress", avatar: "/avatars/yellen.png" },
-        { name: "Gensler (SEC)", status: "busy", message: "Reviewing filings…", avatar: "/avatars/gensler.png" },
-        { name: "Kathy Wood", status: "busy", message: "Updating ARK thesis", avatar: "/avatars/kathy.png" },
-        { name: "J. Powell", status: "busy", message: "Watching CPI charts", avatar: "/avatars/powell.png" },
-      ],
-    },
-    {
-      label: "Offline (6)",
-      contacts: [
-        { name: "SBF", status: "offline", message: "", avatar: "/avatars/sbf.png" },
-        { name: "Sam Altman", status: "offline", message: "", avatar: "/avatars/sam-altman.png" },
-        { name: "Naval Ravikant", status: "offline", message: "", avatar: "/avatars/naval.png" },
-        { name: "Chamath P.", status: "offline", message: "", avatar: "/avatars/chamath.png" },
-        { name: "Marc Andreessen", status: "offline", message: "", avatar: "/avatars/marc.png" },
-        { name: "Linus Torvalds", status: "offline", message: "", avatar: "/avatars/linus.png" },
-      ],
-    },
-  ]
-
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case "online":
-        return "var(--success-green)"
-      case "away":
-        return "var(--alert-orange)"
-      case "busy":
-        return "#E74C3C"
-      case "offline":
-        return "#95A5A6"
-      default:
-        return "var(--success-green)"
+  const handleUsernameSubmit = () => {
+    if (tempUsername.trim()) {
+      setUsername(tempUsername.trim())
+      setShowUsernameModal(false)
     }
   }
 
-  const rooms = [
-    { id: "lobby", label: "Lobby" },
-    { id: "bnb", label: "BNB" },
-    { id: "usa", label: "USA" },
-    { id: "dev", label: "Dev" },
+  const contacts = [
+    { id: 1, name: "Elon", avatar: "/avatars/elon.png", status: "Online", room: "elon" },
+    { id: 2, name: "Vitalik", avatar: "/avatars/vitalik.png", status: "Online", room: "vitalik" },
+    { id: 3, name: "CZ", avatar: "/avatars/cz.png", status: "Online", room: "cz" },
+    { id: 4, name: "SBF", avatar: "/avatars/sbf.png", status: "Offline", room: "sbf" },
+    { id: 5, name: "Saylor", avatar: "/avatars/saylor.png", status: "Online", room: "saylor" },
+    { id: 6, name: "Jack Dorsey", avatar: "/avatars/dorsey.png", status: "Online", room: "dorsey" },
+    { id: 7, name: "Naval", avatar: "/avatars/naval.png", status: "Online", room: "naval" },
+    { id: 8, name: "Balaji", avatar: "/avatars/balaji.png", status: "Online", room: "balaji" },
+    { id: 9, name: "Marc Andreessen", avatar: "/avatars/marc.png", status: "Online", room: "marc" },
+    { id: 10, name: "Chamath", avatar: "/avatars/chamath.png", status: "Online", room: "chamath" },
+    { id: 11, name: "Cathie Wood", avatar: "/avatars/kathy.png", status: "Online", room: "kathy" },
+    { id: 12, name: "Brian Armstrong", avatar: "/avatars/brian.png", status: "Online", room: "brian" },
+    { id: 13, name: "Sam Altman", avatar: "/avatars/sam-altman.png", status: "Online", room: "sam" },
+    { id: 14, name: "Linus", avatar: "/avatars/linus.png", status: "Online", room: "linus" },
+    { id: 15, name: "Donald Trump", avatar: "/avatars/trump.png", status: "Online", room: "trump" },
+    { id: 16, name: "Joe Biden", avatar: "/avatars/biden.png", status: "Online", room: "biden" },
+    { id: 17, name: "Gary Gensler", avatar: "/avatars/gensler.png", status: "Online", room: "gensler" },
+    { id: 18, name: "Jerome Powell", avatar: "/avatars/powell.png", status: "Online", room: "powell" },
+    { id: 19, name: "Janet Yellen", avatar: "/avatars/yellen.png", status: "Online", room: "yellen" },
+    { id: 20, name: "Nayib Bukele", avatar: "/avatars/bukele.png", status: "Online", room: "bukele" },
   ]
 
   return (
     <div
-      className={`h-screen flex p-2 ${isNudging ? "animate-shake" : ""}`}
+      className="flex h-screen overflow-hidden font-sans"
       style={{ background: "linear-gradient(to bottom, #2dd881, #0d7a3f)" }}
     >
-      {/* Left Sidebar - Contacts */}
+      <Modal isOpen={showUsernameModal} onClose={() => {}}>
+        <div className="p-6">
+          <h2 className="mb-4 text-xl font-bold" style={{ color: "var(--text-primary)" }}>
+            {"Choose your username"}
+          </h2>
+          <input
+            type="text"
+            value={tempUsername}
+            onChange={(e) => setTempUsername(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                handleUsernameSubmit()
+              }
+            }}
+            className="mb-4 w-full rounded border border-gray-300 px-3 py-2 focus:border-[var(--msn-blue-500)] focus:outline-none"
+            placeholder="Enter username..."
+            autoFocus
+          />
+          <div className="mb-4 flex items-center gap-2">
+            <span className="text-sm" style={{ color: "var(--text-muted)" }}>
+              {"Your color:"}
+            </span>
+            <div
+              className="h-6 w-6 rounded-full border border-gray-300"
+              style={{ backgroundColor: userColor }}
+            />
+          </div>
+          <button
+            onClick={handleUsernameSubmit}
+            className="w-full rounded px-4 py-2 font-semibold text-white"
+            style={{ background: "var(--msn-blue-500)" }}
+          >
+            {"Join Chat"}
+          </button>
+        </div>
+      </Modal>
+
+      {/* Left sidebar */}
       <div
-        className="w-80 bg-white flex flex-col overflow-hidden"
+        className="flex w-64 flex-col border-r"
         style={{
-          borderRadius: "10px",
-          border: "1px solid var(--msn-border)",
-          boxShadow: "0 2px 6px rgba(0,0,0,.12), inset 0 1px 0 rgba(255,255,255,.7)",
+          borderColor: "var(--msn-border)",
+          background: "linear-gradient(to bottom, #FFFFFF, #f0fdf4)",
         }}
       >
         {/* Header */}
         <div
-          className="p-3 flex items-center gap-2"
+          className="flex items-center gap-2 border-b px-4 py-3"
           style={{
-            background: "linear-gradient(to bottom, var(--msn-blue-200), var(--msn-blue-100))",
-            borderBottom: "1px solid var(--msn-border)",
+            borderColor: "var(--msn-border)",
           }}
         >
-                <Image src="/4ssenger-logo.png" alt="4ssenger" width={24} height={24} className="flex-shrink-0" />
-                <span style={{ color: "var(--text-primary)", fontWeight: "600", fontSize: "15px" }}>4ssenger</span>
+          <Image src="/4ssenger-logo.png" alt="4ssenger" width={24} height={24} className="flex-shrink-0" />
+          <span style={{ color: "var(--text-primary)", fontWeight: "600", fontSize: "15px" }}>4ssenger</span>
         </div>
 
         {/* Toolbar */}
         <div
-          className="p-2 flex gap-1"
+          className="flex items-center justify-between border-b px-4 py-2"
           style={{
-            background: "var(--msn-silver-200)",
-            borderBottom: "1px solid var(--msn-border)",
+            borderColor: "var(--msn-border)",
           }}
         >
+          <div className="flex gap-1">
+            <button
+              className="rounded p-1 transition-colors"
+              style={{
+                background: "linear-gradient(to bottom, #FFFFFF, #f0fdf4)",
+                border: "1px solid var(--msn-border)",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = "linear-gradient(to bottom, #f0fdf4, #d1fae5)"
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = "linear-gradient(to bottom, #FFFFFF, #f0fdf4)"
+              }}
+              aria-label="Search"
+            >
+              <Search size={16} style={{ color: "var(--text-primary)" }} />
+            </button>
+            <button
+              className="rounded p-1 transition-colors"
+              style={{
+                background: "linear-gradient(to bottom, #FFFFFF, #f0fdf4)",
+                border: "1px solid var(--msn-border)",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = "linear-gradient(to bottom, #f0fdf4, #d1fae5)"
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = "linear-gradient(to bottom, #FFFFFF, #f0fdf4)"
+              }}
+              aria-label="Add contact"
+            >
+              <UserPlus size={16} style={{ color: "var(--text-primary)" }} />
+            </button>
+          </div>
           <button
-            className="h-8 w-8 flex items-center justify-center transition-all"
+            className="rounded p-1 transition-colors"
             style={{
-              borderRadius: "6px",
               background: "linear-gradient(to bottom, #FFFFFF, #f0fdf4)",
               border: "1px solid var(--msn-border)",
-              boxShadow: "inset 0 1px 0 rgba(255,255,255,.7)",
             }}
             onMouseEnter={(e) => {
               e.currentTarget.style.background = "linear-gradient(to bottom, #f0fdf4, #d1fae5)"
-              e.currentTarget.style.outline = "1px solid var(--msn-blue-500)"
             }}
             onMouseLeave={(e) => {
               e.currentTarget.style.background = "linear-gradient(to bottom, #FFFFFF, #f0fdf4)"
-              e.currentTarget.style.outline = "none"
-            }}
-            aria-label="Mail"
-          >
-            <Mail className="h-4 w-4" style={{ color: "var(--msn-blue-700)" }} />
-          </button>
-          <button
-            className="h-8 w-8 flex items-center justify-center transition-all"
-            style={{
-              borderRadius: "6px",
-              background: "linear-gradient(to bottom, #FFFFFF, #f0fdf4)",
-              border: "1px solid var(--msn-border)",
-              boxShadow: "inset 0 1px 0 rgba(255,255,255,.7)",
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = "linear-gradient(to bottom, #f0fdf4, #d1fae5)"
-              e.currentTarget.style.outline = "1px solid var(--msn-blue-500)"
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = "linear-gradient(to bottom, #FFFFFF, #f0fdf4)"
-              e.currentTarget.style.outline = "none"
-            }}
-            aria-label="Phone"
-          >
-            <Phone className="h-4 w-4" style={{ color: "var(--msn-blue-700)" }} />
-          </button>
-          <button
-            className="h-8 w-8 flex items-center justify-center transition-all"
-            style={{
-              borderRadius: "6px",
-              background: "linear-gradient(to bottom, #FFFFFF, #f0fdf4)",
-              border: "1px solid var(--msn-border)",
-              boxShadow: "inset 0 1px 0 rgba(255,255,255,.7)",
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = "linear-gradient(to bottom, #f0fdf4, #d1fae5)"
-              e.currentTarget.style.outline = "1px solid var(--msn-blue-500)"
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = "linear-gradient(to bottom, #FFFFFF, #f0fdf4)"
-              e.currentTarget.style.outline = "none"
-            }}
-            aria-label="Video"
-          >
-            <Video className="h-4 w-4" style={{ color: "var(--msn-blue-700)" }} />
-          </button>
-          <div className="flex-1" />
-          <button
-            onClick={() => setSettingsModalOpen(true)}
-            title="Settings"
-            className="h-8 w-8 flex items-center justify-center transition-all"
-            style={{
-              borderRadius: "6px",
-              background: "linear-gradient(to bottom, #FFFFFF, #f0fdf4)",
-              border: "1px solid var(--msn-border)",
-              boxShadow: "inset 0 1px 0 rgba(255,255,255,.7)",
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = "linear-gradient(to bottom, #f0fdf4, #d1fae5)"
-              e.currentTarget.style.outline = "1px solid var(--msn-blue-500)"
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = "linear-gradient(to bottom, #FFFFFF, #f0fdf4)"
-              e.currentTarget.style.outline = "none"
             }}
             aria-label="Settings"
           >
-            <Settings className="h-4 w-4" style={{ color: "var(--msn-blue-700)" }} />
+            <Settings size={16} style={{ color: "var(--text-primary)" }} />
           </button>
         </div>
 
-        {/* Search */}
-        <div className="p-3" style={{ borderBottom: "1px solid var(--msn-silver-200)" }}>
-          <div className="relative">
-            <input
-              placeholder="Find a contact..."
-              className="w-full h-8 pr-16 text-sm transition-all outline-none"
-              style={{
-                borderRadius: "16px",
-                border: "1px solid var(--msn-border)",
-                paddingLeft: "12px",
-                paddingRight: "64px",
-                fontSize: "13px",
-                boxShadow: "inset 0 1px 2px rgba(0,0,0,.08)",
-                color: "var(--text-primary)",
-              }}
-              onFocus={(e) => {
-                e.currentTarget.style.outline = "2px solid rgba(90,161,227,.4)"
-                e.currentTarget.style.outlineOffset = "0px"
-              }}
-              onBlur={(e) => {
-                e.currentTarget.style.outline = "none"
-              }}
-            />
-            <div className="absolute right-1 top-1 flex gap-1">
-              <button
-                onClick={() => setAddContactModalOpen(true)}
-                title="Add contact"
-                className="h-6 w-6 flex items-center justify-center transition-all"
-                style={{
-                  borderRadius: "6px",
-                  background: "linear-gradient(to bottom, #FFFFFF, #f0fdf4)",
-                  border: "1px solid var(--msn-border)",
-                  boxShadow: "inset 0 1px 0 rgba(255,255,255,.7)",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = "linear-gradient(to bottom, #f0fdf4, #d1fae5)"
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = "linear-gradient(to bottom, #FFFFFF, #f0fdf4)"
-                }}
-                aria-label="Add contact"
-              >
-                <UserPlus className="h-3 w-3" style={{ color: "var(--success-green)" }} />
-              </button>
-              <button
-                className="h-6 w-6 flex items-center justify-center transition-all"
-                style={{
-                  borderRadius: "6px",
-                  background: "linear-gradient(to bottom, #FFFFFF, #f0fdf4)",
-                  border: "1px solid var(--msn-border)",
-                  boxShadow: "inset 0 1px 0 rgba(255,255,255,.7)",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = "linear-gradient(to bottom, #f0fdf4, #d1fae5)"
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = "linear-gradient(to bottom, #FFFFFF, #f0fdf4)"
-                }}
-                aria-label="Search"
-              >
-                <Search className="h-3 w-3" style={{ color: "var(--msn-blue-700)" }} />
-              </button>
+        {/* User info */}
+        <div
+          className="border-b px-4 py-3"
+          style={{
+            borderColor: "var(--msn-border)",
+          }}
+        >
+          <div className="flex items-center gap-3">
+            <div className="relative">
+              <Image
+                src="/4ssenger-logo.png"
+                alt="User"
+                width={32}
+                height={32}
+                className="rounded-full border"
+                style={{ borderColor: "var(--msn-border)" }}
+              />
+              <div
+                className="absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-white"
+                style={{ backgroundColor: "var(--success-green)" }}
+              />
+            </div>
+            <div className="flex-1">
+              <div className="text-sm font-semibold" style={{ color: "var(--text-primary)" }}>
+                {username || "Guest"}
+              </div>
+              <div className="text-xs" style={{ color: "var(--text-muted)" }}>
+                {"Online"}
+              </div>
             </div>
           </div>
         </div>
 
-        {/* Contacts List */}
+        {/* Contacts list */}
         <ScrollArea className="flex-1" style={{ background: "linear-gradient(to bottom, #ecfdf5, #FFFFFF)" }}>
           <div className="p-2">
-            {contactGroups.map((group, groupIndex) => (
-              <div key={groupIndex} className="mb-2">
-                <div
-                  className="text-xs font-semibold mb-2 flex items-center gap-1 px-2 py-1"
-                  style={{
-                    background: "#ecfdf5",
-                    borderRadius: "6px",
-                    color: "var(--text-primary)",
-                  }}
-                >
-                  <span style={{ fontSize: "10px" }}>▼</span>
-                  <span>{group.label}</span>
+            {contacts.map((contact, i) => (
+              <button
+                key={contact.id}
+                onClick={() => setCurrentRoom(contact.room)}
+                className="mb-1 flex w-full items-center gap-3 rounded px-3 py-2 text-left transition-colors"
+                style={{
+                  background: "#ecfdf5",
+                  border: currentRoom === contact.room ? "1px solid var(--msn-blue-500)" : "1px solid transparent",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "#f0fdf4"
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "#ecfdf5"
+                }}
+              >
+                <div className="relative">
+                  <Image
+                    src={contact.avatar || "/placeholder.svg"}
+                    alt={contact.name}
+                    width={32}
+                    height={32}
+                    className="rounded-full border"
+                    style={{ borderColor: "var(--msn-border)" }}
+                  />
+                  {contact.status === "Online" && (
+                    <div
+                      className="absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-white"
+                      style={{ backgroundColor: "var(--success-green)" }}
+                    />
+                  )}
                 </div>
-                {group.contacts.map((contact, i) => (
-                  <div
-                    key={i}
-                    className="flex items-start gap-2 p-2 cursor-pointer transition-all"
-                    style={{ borderRadius: "8px" }}
-                    onMouseEnter={(e) => {
-                e.currentTarget.style.background = "#f0fdf4"
-                    }}
-                    onMouseLeave={(e) => {
-                      e.currentTarget.style.background = "transparent"
-                    }}
-                  >
-                    <div className="relative">
-                      {contact.avatar.startsWith("/avatars/") ? (
-                        <Image
-                          src={contact.avatar || "/placeholder.svg"}
-                          alt={contact.name}
-                          width={24}
-                          height={24}
-                          className="rounded-full object-cover"
-                          style={{
-                            border: "1px solid rgba(0,0,0,.1)",
-                          }}
-                        />
-                      ) : (
-                        <div
-                          className="w-6 h-6 rounded-full"
-                          style={{
-                            background: "linear-gradient(to bottom right, #43B649, #5AA1E3)",
-                            border: "1px solid rgba(0,0,0,.1)",
-                          }}
-                        />
-                      )}
-                      {contact.status !== "offline" && (
-                        <div
-                          className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full"
-                          style={{
-                            background: getStatusColor(contact.status),
-                            border: "1px solid white",
-                            boxShadow: "0 0 2px rgba(0,0,0,.2)",
-                          }}
-                        />
-                      )}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="font-semibold" style={{ fontSize: "13px", color: "var(--text-primary)" }}>
-                        {contact.name}
-                      </div>
-                      {contact.message && (
-                        <div className="truncate" style={{ fontSize: "12px", color: "var(--text-muted)" }}>
-                          {contact.message}
-                        </div>
-                      )}
-                    </div>
+                <div className="flex-1 overflow-hidden">
+                  <div className="truncate text-sm font-medium" style={{ color: "var(--text-primary)" }}>
+                    {contact.name}
                   </div>
-                ))}
-              </div>
+                  <div className="truncate text-xs" style={{ color: "var(--text-muted)" }}>
+                    {contact.status}
+                  </div>
+                </div>
+              </button>
             ))}
           </div>
         </ScrollArea>
-
-        {/* Advertisement */}
-        <div className="p-2" style={{ borderTop: "1px solid var(--msn-border)" }}>
-          <div className="text-xs mb-1" style={{ color: "var(--text-muted)" }}>
-            Advertisement
-          </div>
-          <div
-            className="rounded p-2 flex items-center gap-2"
-            style={{
-              background: "linear-gradient(to right, var(--msn-blue-500), #10b981)",
-              border: "1px solid var(--msn-border)",
-              boxShadow: "inset 0 1px 0 rgba(255,255,255,.3)",
-            }}
-          >
-                <div className="text-xs font-bold text-white flex-1">4ssenger Live</div>
-                <Image
-                  src="/4ssenger-logo.png"
-                  alt="4ssenger"
-              width={32}
-              height={32}
-              className="flex-shrink-0 rounded"
-              style={{
-                border: "1px solid rgba(255,255,255,.3)",
-              }}
-            />
-          </div>
-        </div>
       </div>
 
-      {/* Main Chat Area */}
-      <div
-        className="flex-1 ml-2 bg-white flex flex-col overflow-hidden"
-        style={{
-          borderRadius: "10px",
-          border: "1px solid var(--msn-border)",
-          boxShadow: "0 2px 6px rgba(0,0,0,.12), inset 0 1px 0 rgba(255,255,255,.7)",
-        }}
-      >
-        {/* Chat Header */}
+      {/* Main chat area */}
+      <div className="flex flex-1 flex-col">
+        {/* Chat header */}
         <div
-          className="p-2 flex items-center justify-between"
+          className="flex items-center justify-between border-b px-4 py-2"
           style={{
-            background: "linear-gradient(to bottom, var(--msn-blue-200), var(--msn-blue-100))",
-            borderBottom: "1px solid var(--msn-border)",
+            borderColor: "var(--msn-border)",
+            background: "linear-gradient(to bottom, #FFFFFF, #f0fdf4)",
           }}
         >
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
+            <Image
+              src="/4ssenger-logo.png"
+              alt={currentRoom}
+              width={32}
+              height={32}
+              className="rounded-full border"
+              style={{ borderColor: "var(--msn-border)" }}
+            />
+            <div>
+              <div className="text-sm font-semibold" style={{ color: "var(--text-primary)" }}>
+                {currentRoom.charAt(0).toUpperCase() + currentRoom.slice(1)}
+              </div>
+              <div className="text-xs" style={{ color: "var(--text-muted)" }}>
+                {"Online"}
+              </div>
+            </div>
+          </div>
+          <div className="flex gap-2">
             <button
-              onClick={() => setInviteModalOpen(true)}
-              title="Invite (Ctrl+I)"
-              className="h-8 w-8 flex items-center justify-center transition-all"
+              className="rounded p-2 transition-colors"
               style={{
-                borderRadius: "6px",
                 background: "linear-gradient(to bottom, #FFFFFF, #f0fdf4)",
                 border: "1px solid var(--msn-border)",
-                boxShadow: "inset 0 1px 0 rgba(255,255,255,.7)",
               }}
               onMouseEnter={(e) => {
                 e.currentTarget.style.background = "linear-gradient(to bottom, #f0fdf4, #d1fae5)"
@@ -621,59 +525,15 @@ export default function ForssengerPage() {
               onMouseLeave={(e) => {
                 e.currentTarget.style.background = "linear-gradient(to bottom, #FFFFFF, #f0fdf4)"
               }}
-              aria-label="Invite"
+              aria-label="Email"
             >
-              <Mail className="h-4 w-4" style={{ color: "var(--msn-blue-700)" }} />
+              <Mail size={16} style={{ color: "var(--text-primary)" }} />
             </button>
             <button
-              onClick={() => setFilesModalOpen(true)}
-              title="Send Files (Ctrl+F)"
-              className="h-8 w-8 flex items-center justify-center transition-all"
+              className="rounded p-2 transition-colors"
               style={{
-                borderRadius: "6px",
                 background: "linear-gradient(to bottom, #FFFFFF, #f0fdf4)",
                 border: "1px solid var(--msn-border)",
-                boxShadow: "inset 0 1px 0 rgba(255,255,255,.7)",
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = "linear-gradient(to bottom, #f0fdf4, #d1fae5)"
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = "linear-gradient(to bottom, #FFFFFF, #f0fdf4)"
-              }}
-              aria-label="Send Files"
-            >
-              <ImageIcon className="h-4 w-4" style={{ color: "var(--msn-blue-700)" }} />
-            </button>
-            <button
-              onClick={() => setWebcamModalOpen(true)}
-              title="Webcam"
-              className="h-8 w-8 flex items-center justify-center transition-all"
-              style={{
-                borderRadius: "6px",
-                background: "linear-gradient(to bottom, #FFFFFF, #f0fdf4)",
-                border: "1px solid var(--msn-border)",
-                boxShadow: "inset 0 1px 0 rgba(255,255,255,.7)",
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = "linear-gradient(to bottom, #f0fdf4, #d1fae5)"
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = "linear-gradient(to bottom, #FFFFFF, #f0fdf4)"
-              }}
-              aria-label="Webcam"
-            >
-              <Video className="h-4 w-4" style={{ color: "var(--msn-blue-700)" }} />
-            </button>
-            <button
-              onClick={() => setCallModalOpen(true)}
-              title="Call"
-              className="h-8 w-8 flex items-center justify-center transition-all"
-              style={{
-                borderRadius: "6px",
-                background: "linear-gradient(to bottom, #FFFFFF, #f0fdf4)",
-                border: "1px solid var(--msn-border)",
-                boxShadow: "inset 0 1px 0 rgba(255,255,255,.7)",
               }}
               onMouseEnter={(e) => {
                 e.currentTarget.style.background = "linear-gradient(to bottom, #f0fdf4, #d1fae5)"
@@ -683,544 +543,194 @@ export default function ForssengerPage() {
               }}
               aria-label="Call"
             >
-              <Phone className="h-4 w-4" style={{ color: "var(--msn-blue-700)" }} />
+              <Phone size={16} style={{ color: "var(--text-primary)" }} />
             </button>
             <button
-              onClick={handleNudge}
-              title="Nudge (Ctrl+N)"
-              className="h-8 w-8 flex items-center justify-center transition-all"
+              className="rounded p-2 transition-colors"
               style={{
-                borderRadius: "6px",
                 background: "linear-gradient(to bottom, #FFFFFF, #f0fdf4)",
                 border: "1px solid var(--msn-border)",
-                boxShadow: "inset 0 1px 0 rgba(255,255,255,.7)",
               }}
               onMouseEnter={(e) => {
                 e.currentTarget.style.background = "linear-gradient(to bottom, #f0fdf4, #d1fae5)"
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = "linear-gradient(to bottom, #FFFFFF, #f0fdf4)"
+              }}
+              aria-label="Video call"
+            >
+              <Video size={16} style={{ color: "var(--text-primary)" }} />
+            </button>
+          </div>
+        </div>
+
+        {/* Live banner */}
+        <div
+          className={`flex items-center gap-2 px-4 py-1.5 ${isNudging ? "animate-bounce" : ""}`}
+          style={{
+            background: "linear-gradient(to right, var(--msn-blue-500), #10b981)",
+          }}
+        >
+          <Zap size={14} className="text-white" fill="white" />
+          <div className="text-xs font-bold text-white flex-1">4ssenger Live</div>
+          <Image
+            src="/4ssenger-logo.png"
+            alt="4ssenger"
+            width={16}
+            height={16}
+            className="rounded-full"
+            style={{ border: "1px solid white" }}
+          />
+        </div>
+
+        {/* Messages area */}
+        <div className="flex-1 overflow-hidden bg-white">
+          <ScrollArea className="h-full px-4 py-2">
+            <div className="space-y-1">
+              {messages.map((msg, i) => (
+                <div
+                  key={msg.id}
+                  className="flex items-start gap-2 rounded px-2 py-1 text-sm"
+                  style={{
+                    background: i % 2 === 0 ? "transparent" : "#f0fdf4",
+                  }}
+                >
+                  <span className="font-bold" style={{ color: msg.user_color }}>
+                    {msg.username}:
+                  </span>
+                  <span style={{ color: "var(--text-primary)" }}>{msg.message}</span>
+                </div>
+              ))}
+              <div ref={messagesEndRef} />
+            </div>
+          </ScrollArea>
+        </div>
+
+        {/* Typing indicator */}
+        {typingUsers.length > 0 && (
+          <div className="border-t px-4 py-2 text-xs" style={{ borderColor: "var(--msn-border)" }}>
+            <div className="flex items-center gap-1">
+              <Loader2 className="h-3 w-3 animate-spin" style={{ color: "var(--msn-blue-500)" }} />
+              <span style={{ color: "var(--text-muted)" }}>
+                {typingUsers.map((u) => u.username).join(", ")} {typingUsers.length === 1 ? "is" : "are"} typing...
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* Input area */}
+        <div
+          className="border-t p-4"
+          style={{
+            borderColor: "var(--msn-border)",
+            background: "linear-gradient(to bottom, #FFFFFF, #f0fdf4)",
+          }}
+        >
+          <div className="mb-2 flex gap-2">
+            <button
+              onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+              className="rounded p-2 transition-colors"
+              style={{
+                background: "linear-gradient(to bottom, #FFFFFF, #f0fdf4)",
+                border: "1px solid var(--msn-border)",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = "linear-gradient(to bottom, #f0fdf4, #d1fae5)"
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = "linear-gradient(to bottom, #FFFFFF, #f0fdf4)"
+              }}
+              aria-label="Emoji"
+            >
+              <Smile size={16} style={{ color: "var(--text-primary)" }} />
+            </button>
+            <button
+              onClick={handleNudge}
+              disabled={isNudging}
+              className="rounded p-2 transition-colors disabled:opacity-50"
+              style={{
+                background: "linear-gradient(to bottom, #FFFFFF, #f0fdf4)",
+                border: "1px solid var(--msn-border)",
+              }}
+              onMouseEnter={(e) => {
+                if (!isNudging) {
+                  e.currentTarget.style.background = "linear-gradient(to bottom, #f0fdf4, #d1fae5)"
+                }
               }}
               onMouseLeave={(e) => {
                 e.currentTarget.style.background = "linear-gradient(to bottom, #FFFFFF, #f0fdf4)"
               }}
               aria-label="Nudge"
             >
-              <Zap className="h-4 w-4" style={{ color: "var(--alert-orange)" }} />
+              <Zap size={16} style={{ color: isNudging ? "var(--text-muted)" : "var(--text-primary)" }} />
+            </button>
+            <button
+              className="rounded p-2 transition-colors"
+              style={{
+                background: "linear-gradient(to bottom, #FFFFFF, #f0fdf4)",
+                border: "1px solid var(--msn-border)",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = "linear-gradient(to bottom, #f0fdf4, #d1fae5)"
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = "linear-gradient(to bottom, #FFFFFF, #f0fdf4)"
+              }}
+              aria-label="Send image"
+            >
+              <ImageIcon size={16} style={{ color: "var(--text-primary)" }} />
             </button>
           </div>
-          <div className="flex gap-2">
-            <Image
-              src="/4ssenger-logo.png"
-              alt="Profile"
-              width={40}
-              height={40}
-              className="rounded object-cover"
-              style={{
-                border: "2px solid rgba(255,255,255,.8)",
-                boxShadow: "0 1px 3px rgba(0,0,0,.2)",
-              }}
-            />
-            <Image
-              src="/4ssenger-logo.png"
-              alt="Profile"
-              width={40}
-              height={40}
-              className="rounded object-cover"
-              style={{
-                border: "2px solid rgba(255,255,255,.8)",
-                boxShadow: "0 1px 3px rgba(0,0,0,.2)",
-              }}
-            />
-          </div>
-        </div>
 
-        <div
-          className="px-4 py-2 flex items-center justify-end"
-          style={{
-            background: "var(--msn-blue-100)",
-            borderBottom: "1px solid var(--msn-blue-200)",
-          }}
-        >
-          <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>
-            You are: <span style={{ color: userColor, fontWeight: "600" }}>{username}</span>
-          </span>
-        </div>
-
-        {/* Messages Area */}
-        <ScrollArea
-          className="flex-1 p-4"
-          style={{
-            background: "#FFFFFF",
-            border: "1px solid #E6EEF7",
-          }}
-        >
-          <div className="space-y-0">
-            {messages.map((msg, i) => (
-              <div
-                key={msg.id}
-                className="py-1 px-2"
-                style={{
-                  fontSize: "13px",
-                  background: i % 2 === 0 ? "transparent" : "#f0fdf4",
+          {showEmojiPicker && (
+            <div className="mb-2">
+              <EmojiPicker
+                onEmojiSelect={(emoji) => {
+                  setMessage((prev) => prev + emoji)
+                  setShowEmojiPicker(false)
                 }}
-              >
-                <span style={{ fontWeight: "600", color: msg.user_color }}>{msg.username}:</span>{" "}
-                <span style={{ color: "var(--text-primary)" }}>{msg.message}</span>
-                <span
-                  style={{
-                    fontSize: "12px",
-                    color: "var(--text-muted)",
-                    marginLeft: "8px",
-                  }}
-                >
-                  {new Date(msg.created_at).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}
-                </span>
-              </div>
-            ))}
-            <div ref={messagesEndRef} />
-          </div>
-          {typingUsers.length > 0 && (
-            <div className="py-2 px-2 text-xs italic" style={{ color: "var(--text-muted)" }}>
-              {typingUsers
-                .map((user) => (
-                  <span key={user.username} style={{ color: user.user_color }}>
-                    {user.username}
-                  </span>
-                ))
-                .reduce((prev, curr) => [prev, ", ", curr] as any)}{" "}
-              {typingUsers.length === 1 ? "is" : "are"} typing...
+              />
             </div>
           )}
-        </ScrollArea>
 
-        {/* Input Area */}
-        <div className="p-3" style={{ borderTop: "1px solid var(--msn-border)" }}>
-          <div
-            className="flex gap-1 mb-2 p-1"
-            style={{
-              background: "var(--msn-silver-100)",
-              borderRadius: "6px",
-            }}
-          >
-            <button
-              className="h-7 px-2 flex items-center justify-center transition-all text-xs font-semibold"
-              style={{
-                borderRadius: "4px",
-                background: "linear-gradient(to bottom, #FFFFFF, #f0fdf4)",
-                border: "1px solid var(--msn-border)",
-                boxShadow: "inset 0 1px 0 rgba(255,255,255,.7)",
-                color: "var(--text-primary)",
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = "linear-gradient(to bottom, #f0fdf4, #d1fae5)"
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = "linear-gradient(to bottom, #FFFFFF, #f0fdf4)"
-              }}
-              aria-label="Font"
-            >
-              Font
-            </button>
-            <div className="relative">
-              <button
-                onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-                className="h-7 w-7 flex items-center justify-center transition-all"
-                style={{
-                  borderRadius: "4px",
-                  background: "linear-gradient(to bottom, #FFFFFF, #f0fdf4)",
-                  border: "1px solid var(--msn-border)",
-                  boxShadow: "inset 0 1px 0 rgba(255,255,255,.7)",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = "linear-gradient(to bottom, #f0fdf4, #d1fae5)"
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = "linear-gradient(to bottom, #FFFFFF, #f0fdf4)"
-                }}
-                aria-label="Emoticons"
-              >
-                <Smile className="h-4 w-4" style={{ color: "var(--alert-orange)" }} />
-              </button>
-              {showEmojiPicker && (
-                <EmojiPicker
-                  onSelect={(emoji) => setMessage((prev) => prev + emoji)}
-                  onClose={() => setShowEmojiPicker(false)}
-                />
-              )}
-            </div>
-            <button
-              onClick={() => setMessage((prev) => prev + "😊")}
-              className="h-7 w-7 flex items-center justify-center transition-all"
-              style={{
-                borderRadius: "4px",
-                background: "linear-gradient(to bottom, #FFFFFF, #f0fdf4)",
-                border: "1px solid var(--msn-border)",
-                boxShadow: "inset 0 1px 0 rgba(255,255,255,.7)",
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = "linear-gradient(to bottom, #f0fdf4, #d1fae5)"
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = "linear-gradient(to bottom, #FFFFFF, #f0fdf4)"
-              }}
-            >
-              <span style={{ fontSize: "14px" }}>😊</span>
-            </button>
-            <button
-              onClick={() => setMessage((prev) => prev + "😂")}
-              className="h-7 w-7 flex items-center justify-center transition-all"
-              style={{
-                borderRadius: "4px",
-                background: "linear-gradient(to bottom, #FFFFFF, #f0fdf4)",
-                border: "1px solid var(--msn-border)",
-                boxShadow: "inset 0 1px 0 rgba(255,255,255,.7)",
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = "linear-gradient(to bottom, #f0fdf4, #d1fae5)"
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = "linear-gradient(to bottom, #FFFFFF, #f0fdf4)"
-              }}
-            >
-              <span style={{ fontSize: "14px" }}>😂</span>
-            </button>
-            <button
-              onClick={() => setMessage((prev) => prev + "😎")}
-              className="h-7 w-7 flex items-center justify-center transition-all"
-              style={{
-                borderRadius: "4px",
-                background: "linear-gradient(to bottom, #FFFFFF, #f0fdf4)",
-                border: "1px solid var(--msn-border)",
-                boxShadow: "inset 0 1px 0 rgba(255,255,255,.7)",
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = "linear-gradient(to bottom, #f0fdf4, #d1fae5)"
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = "linear-gradient(to bottom, #FFFFFF, #f0fdf4)"
-              }}
-            >
-              <span style={{ fontSize: "14px" }}>😎</span>
-            </button>
-          </div>
           <div className="flex gap-2">
             <input
+              type="text"
               value={message}
-              onChange={(e) => setMessage(e.target.value)}
+              onChange={(e) => {
+                setMessage(e.target.value)
+                updateTypingIndicator()
+              }}
               onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  handleSend()
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault()
+                  handleSendMessage()
                 }
               }}
-              placeholder="Type your message here..."
-              className="flex-1 h-10 px-3 text-sm transition-all outline-none"
+              placeholder="Type a message..."
+              className="flex-1 rounded border px-3 py-2 text-sm focus:outline-none"
               style={{
-                borderRadius: "16px",
-                border: "1px solid var(--msn-border)",
-                fontSize: "13px",
-                boxShadow: "inset 0 1px 2px rgba(0,0,0,.08)",
+                borderColor: "var(--msn-border)",
                 color: "var(--text-primary)",
-              }}
-              onFocus={(e) => {
-                e.currentTarget.style.outline = "2px solid rgba(90,161,227,.4)"
-                e.currentTarget.style.outlineOffset = "0px"
-              }}
-              onBlur={(e) => {
-                e.currentTarget.style.outline = "none"
               }}
             />
             <button
-              onClick={handleSend}
-              className="h-10 px-6 flex items-center justify-center transition-all font-semibold text-sm"
+              onClick={handleSendMessage}
+              disabled={!message.trim()}
+              className="rounded px-4 py-2 text-sm font-semibold text-white transition-opacity disabled:opacity-50"
               style={{
-                borderRadius: "16px",
-                background: "linear-gradient(to bottom, var(--msn-blue-600), var(--msn-blue-700))",
-                border: "1px solid var(--msn-blue-800)",
-                boxShadow: "inset 0 1px 0 rgba(255,255,255,.3), 0 2px 4px rgba(0,0,0,.1)",
-                color: "white",
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = "linear-gradient(to bottom, var(--msn-blue-700), var(--msn-blue-800))"
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = "linear-gradient(to bottom, var(--msn-blue-600), var(--msn-blue-700))"
+                background: "var(--msn-blue-500)",
               }}
             >
-              Send
+              {"Send"}
             </button>
+          </div>
+
+          <div className="mt-2 text-xs" style={{ color: "var(--text-muted)" }}>
+            {"Tip: Use :emoji: shortcuts like :rocket: :fire: :heart:"}
           </div>
         </div>
       </div>
-
-      {/* Room Selector */}
-      <div
-        className="w-48 ml-2 bg-white flex flex-col overflow-hidden"
-        style={{
-          borderRadius: "10px",
-          border: "1px solid var(--msn-border)",
-          boxShadow: "0 2px 6px rgba(0,0,0,.12), inset 0 1px 0 rgba(255,255,255,.7)",
-        }}
-      >
-        <div
-          className="p-3"
-          style={{
-            background: "linear-gradient(to bottom, var(--msn-blue-200), var(--msn-blue-100))",
-            borderBottom: "1px solid var(--msn-border)",
-          }}
-        >
-          <span style={{ color: "var(--text-primary)", fontWeight: "600", fontSize: "15px" }}>Chat Rooms</span>
-        </div>
-        <div className="p-2">
-          {rooms.map((room) => (
-            <button
-              key={room.id}
-              onClick={() => setCurrentRoom(room.id)}
-              className="w-full text-left p-3 mb-1 transition-all"
-              style={{
-                borderRadius: "8px",
-                background: currentRoom === room.id ? "var(--msn-blue-100)" : "transparent",
-                border: "1px solid",
-                borderColor: currentRoom === room.id ? "var(--msn-blue-300)" : "transparent",
-                color: currentRoom === room.id ? "var(--msn-blue-700)" : "var(--text-primary)",
-                fontWeight: currentRoom === room.id ? "600" : "normal",
-              }}
-              onMouseEnter={(e) => {
-                if (currentRoom !== room.id) {
-                  e.currentTarget.style.background = "#F5FAFF"
-                }
-              }}
-              onMouseLeave={(e) => {
-                if (currentRoom !== room.id) {
-                  e.currentTarget.style.background = "transparent"
-                }
-              }}
-            >
-              {room.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Modals */}
-      <Modal
-        isOpen={inviteModalOpen}
-        onClose={() => setInviteModalOpen(false)}
-        title="Invite Contact"
-        onAction={() => handleFakeAction("Invitation sent")}
-        isLoading={modalLoading}
-        actionText="Send Invite"
-      >
-        <p className="text-sm mb-4" style={{ color: "var(--text-primary)" }}>
-          Enter the email address of the person you'd like to invite to this conversation.
-        </p>
-        <input
-          placeholder="friend@example.com"
-          className="w-full h-9 px-3 text-sm transition-all outline-none"
-          style={{
-            borderRadius: "6px",
-            border: "1px solid var(--msn-border)",
-            boxShadow: "inset 0 1px 2px rgba(0,0,0,.08)",
-            color: "var(--text-primary)",
-          }}
-        />
-      </Modal>
-
-      <Modal
-        isOpen={filesModalOpen}
-        onClose={() => setFilesModalOpen(false)}
-        title="Send Files"
-        onAction={() => handleFakeAction("Files shared")}
-        isLoading={modalLoading}
-        actionText="Share Files"
-      >
-        <p className="text-sm mb-4" style={{ color: "var(--text-primary)" }}>
-          Select files to share in the conversation.
-        </p>
-        <div
-          className="border-2 border-dashed rounded-lg p-8 text-center"
-          style={{ borderColor: "var(--msn-border)", color: "var(--text-muted)" }}
-        >
-          <ImageIcon className="h-12 w-12 mx-auto mb-2" style={{ color: "var(--msn-blue-500)" }} />
-          <p className="text-sm">Drag and drop files here or click to browse</p>
-        </div>
-      </Modal>
-
-      <Modal
-        isOpen={activitiesModalOpen}
-        onClose={() => setActivitiesModalOpen(false)}
-        title="Activities"
-        onAction={() => handleFakeAction("Activity started")}
-        isLoading={modalLoading}
-        actionText="Start Activity"
-      >
-        <p className="text-sm mb-4" style={{ color: "var(--text-primary)" }}>
-          Choose an activity to start with your contact.
-        </p>
-        <div className="space-y-2">
-          {["Games", "Watch Together", "Whiteboard", "Screen Share"].map((activity) => (
-            <button
-              key={activity}
-              className="w-full text-left p-3 transition-all"
-              style={{
-                borderRadius: "6px",
-                background: "var(--msn-silver-100)",
-                border: "1px solid var(--msn-border)",
-                color: "var(--text-primary)",
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = "var(--msn-blue-100)"
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = "var(--msn-silver-100)"
-              }}
-            >
-              {activity}
-            </button>
-          ))}
-        </div>
-      </Modal>
-
-      <Modal
-        isOpen={webcamModalOpen}
-        onClose={() => setWebcamModalOpen(false)}
-        title="Webcam"
-        onAction={() => handleFakeAction("Webcam started")}
-        isLoading={modalLoading}
-        actionText="Start Webcam"
-      >
-        <div
-          className="rounded-lg overflow-hidden mb-4"
-          style={{
-            background: "var(--msn-silver-200)",
-            aspectRatio: "16/9",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-          <Video className="h-16 w-16" style={{ color: "var(--msn-blue-500)" }} />
-        </div>
-        <p className="text-sm" style={{ color: "var(--text-muted)" }}>
-          Share your webcam feed with your contact.
-        </p>
-      </Modal>
-
-      <Modal
-        isOpen={callModalOpen}
-        onClose={() => setCallModalOpen(false)}
-        title="Start Call"
-        onAction={() => handleFakeAction("Call started")}
-        isLoading={modalLoading}
-        actionText="Call Now"
-      >
-        <p className="text-sm mb-4" style={{ color: "var(--text-primary)" }}>
-          Start a voice call with your contact.
-        </p>
-        <div className="flex gap-4 justify-center">
-          <button
-            className="flex flex-col items-center gap-2 p-4 transition-all"
-            style={{
-              borderRadius: "8px",
-              background: "var(--msn-silver-100)",
-              border: "1px solid var(--msn-border)",
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = "var(--msn-blue-100)"
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = "var(--msn-silver-100)"
-            }}
-          >
-            <Phone className="h-8 w-8" style={{ color: "var(--msn-blue-700)" }} />
-            <span className="text-xs" style={{ color: "var(--text-primary)" }}>
-              Voice Call
-            </span>
-          </button>
-          <button
-            className="flex flex-col items-center gap-2 p-4 transition-all"
-            style={{
-              borderRadius: "8px",
-              background: "var(--msn-silver-100)",
-              border: "1px solid var(--msn-border)",
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = "var(--msn-blue-100)"
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = "var(--msn-silver-100)"
-            }}
-          >
-            <Video className="h-8 w-8" style={{ color: "var(--msn-blue-700)" }} />
-            <span className="text-xs" style={{ color: "var(--text-primary)" }}>
-              Video Call
-            </span>
-          </button>
-        </div>
-      </Modal>
-
-      <Modal
-        isOpen={addContactModalOpen}
-        onClose={() => setAddContactModalOpen(false)}
-        title="Add Contact"
-        onAction={() => handleFakeAction("Contact added")}
-        isLoading={modalLoading}
-        actionText="Add Contact"
-      >
-        <p className="text-sm mb-4" style={{ color: "var(--text-primary)" }}>
-          Enter the email address of the contact you'd like to add.
-        </p>
-        <input
-          placeholder="contact@example.com"
-          className="w-full h-9 px-3 text-sm transition-all outline-none"
-          style={{
-            borderRadius: "6px",
-            border: "1px solid var(--msn-border)",
-            boxShadow: "inset 0 1px 2px rgba(0,0,0,.08)",
-            color: "var(--text-primary)",
-          }}
-        />
-      </Modal>
-
-      <Modal
-        isOpen={settingsModalOpen}
-        onClose={() => setSettingsModalOpen(false)}
-        title="Settings"
-        onAction={() => handleFakeAction("Settings saved")}
-        isLoading={modalLoading}
-        actionText="Save Settings"
-      >
-        <div className="space-y-4">
-          <div>
-            <label className="text-sm font-semibold mb-2 block" style={{ color: "var(--text-primary)" }}>
-              Display Name
-            </label>
-            <input
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              className="w-full h-9 px-3 text-sm transition-all outline-none"
-              style={{
-                borderRadius: "6px",
-                border: "1px solid var(--msn-border)",
-                boxShadow: "inset 0 1px 2px rgba(0,0,0,.08)",
-                color: "var(--text-primary)",
-              }}
-            />
-          </div>
-          <div>
-            <label className="text-sm font-semibold mb-2 block" style={{ color: "var(--text-primary)" }}>
-              Color
-            </label>
-            <input
-              type="color"
-              value={userColor}
-              onChange={(e) => setUserColor(e.target.value)}
-              className="w-full h-9"
-              style={{
-                borderRadius: "6px",
-                border: "1px solid var(--msn-border)",
-              }}
-            />
-          </div>
-        </div>
-      </Modal>
     </div>
   )
 }

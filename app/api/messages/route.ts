@@ -17,6 +17,11 @@ const inMemoryMessages: Message[] = []
 let dbAvailable = false
 
 async function tryDatabase(room: string): Promise<Message[] | null> {
+  // Skip database entirely if service key is not available
+  if (!SUPABASE_SERVICE_KEY || !SUPABASE_URL) {
+    return null
+  }
+
   try {
     const res = await fetch(
       `${SUPABASE_URL}/rest/v1/messages?room=eq.${encodeURIComponent(room)}&order=created_at.asc&limit=100`,
@@ -30,16 +35,19 @@ async function tryDatabase(room: string): Promise<Message[] | null> {
       }
     )
 
+    // Any non-2xx response means DB not ready, use fallback
     if (!res.ok) {
-      const errorText = await res.text()
-      if (errorText.includes("schema cache")) {
-        return null // Schema cache not ready
-      }
+      return null
+    }
+
+    const data = await res.json()
+    // Check if response is actually an error object
+    if (data && data.code) {
       return null
     }
 
     dbAvailable = true
-    return await res.json()
+    return data
   } catch {
     return null
   }

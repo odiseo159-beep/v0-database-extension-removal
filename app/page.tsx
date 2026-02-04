@@ -81,8 +81,6 @@ const EMOJI_SHORTCUTS: Record<string, string> = {
   ":party:": "🎉",
 }
 
-const PROFANITY_WORDS = ["fuck", "shit", "bitch", "ass", "damn", "hell", "crap"]
-
 const CRYPTO_MEME_NAMES = [
   "Hodler",
   "DiamondHands",
@@ -115,15 +113,6 @@ const CRYPTO_MEME_NAMES = [
   "Cope",
   "Hopium",
 ]
-
-function filterProfanity(text: string): string {
-  let filtered = text
-  PROFANITY_WORDS.forEach((word) => {
-    const regex = new RegExp(word, "gi")
-    filtered = filtered.replace(regex, "*".repeat(word.length))
-  })
-  return filtered
-}
 
 function replaceEmojiShortcuts(text: string): string {
   let result = text
@@ -245,7 +234,7 @@ export default function ForssengerPage() {
   const handleSendMessage = async () => {
     if (!message.trim() || !username || rateLimitSeconds > 0) return
 
-    const processedMessage = replaceEmojiShortcuts(filterProfanity(message.trim()))
+    const processedMessage = replaceEmojiShortcuts(message.trim())
 
     try {
       const res = await fetch("/api/messages", {

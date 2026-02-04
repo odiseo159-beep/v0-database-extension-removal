@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from "react"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { Search, UserPlus, Settings, Mail, Phone, Video, ImageIcon, Smile, Loader2, Zap } from "lucide-react"
+import { Search, UserPlus, Settings, Mail, Send, ImageIcon, Smile, Loader2, Zap, Phone, Video } from "lucide-react"
 import Image from "next/image"
 import { Modal } from "@/components/modal"
 import { EmojiPicker } from "@/components/emoji-picker"
@@ -603,8 +603,11 @@ export default function ForssengerPage() {
             >
               <Mail size={16} style={{ color: "var(--text-primary)" }} />
             </button>
-            <button
-              className="rounded p-2 transition-colors"
+            <a
+              href="https://t.me/your_telegram_channel"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="rounded p-2 transition-colors inline-flex items-center justify-center"
               style={{
                 background: "linear-gradient(to bottom, #FFFFFF, #f0fdf4)",
                 border: "1px solid var(--msn-border)",
@@ -615,12 +618,15 @@ export default function ForssengerPage() {
               onMouseLeave={(e) => {
                 e.currentTarget.style.background = "linear-gradient(to bottom, #FFFFFF, #f0fdf4)"
               }}
-              aria-label="Call"
+              aria-label="Telegram"
             >
-              <Phone size={16} style={{ color: "var(--text-primary)" }} />
-            </button>
-            <button
-              className="rounded p-2 transition-colors"
+              <Send size={16} style={{ color: "var(--text-primary)" }} />
+            </a>
+            <a
+              href="https://x.com/your_twitter_handle"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="rounded p-2 transition-colors inline-flex items-center justify-center"
               style={{
                 background: "linear-gradient(to bottom, #FFFFFF, #f0fdf4)",
                 border: "1px solid var(--msn-border)",
@@ -631,10 +637,12 @@ export default function ForssengerPage() {
               onMouseLeave={(e) => {
                 e.currentTarget.style.background = "linear-gradient(to bottom, #FFFFFF, #f0fdf4)"
               }}
-              aria-label="Video call"
+              aria-label="X (Twitter)"
             >
-              <Video size={16} style={{ color: "var(--text-primary)" }} />
-            </button>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style={{ color: "var(--text-primary)" }}>
+                <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+              </svg>
+            </a>
           </div>
         </div>
 

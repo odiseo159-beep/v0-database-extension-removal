@@ -182,7 +182,13 @@ export default function ForssengerPage() {
     const pollMessages = async () => {
       try {
         const data = await fetchMessagesAPI(currentRoom)
-        setMessages(data)
+        // Only update if different to prevent unnecessary re-renders
+        setMessages((prev) => {
+          if (JSON.stringify(prev) === JSON.stringify(data)) {
+            return prev
+          }
+          return data
+        })
       } catch (error) {
         // Silently ignore polling errors
       }

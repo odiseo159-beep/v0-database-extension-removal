@@ -23,9 +23,9 @@ export async function GET(request: NextRequest) {
   try {
     // Get all typing indicators for this room
     const typingKey = `typing:${room}`
-    const typingData = await redis.hgetall<Record<string, string>>(typingKey)
+    const typingData = await redis.hgetall(typingKey)
 
-    if (!typingData) {
+    if (!typingData || typeof typingData !== 'object' || Object.keys(typingData).length === 0) {
       return NextResponse.json([])
     }
 
@@ -34,14 +34,25 @@ export async function GET(request: NextRequest) {
     const typingUsers: TypingIndicator[] = []
 
     for (const [username, data] of Object.entries(typingData)) {
-      const indicator = JSON.parse(data) as TypingIndicator
-      const updatedAt = new Date(indicator.updated_at).getTime()
-      
-      // Remove if older than 10 seconds
-      if (now - updatedAt > TYPING_EXPIRATION_SECONDS * 1000) {
+      try {
+        // Ensure data is a string before parsing
+        if (typeof data !== 'string') {
+          continue
+        }
+        
+        const indicator = JSON.parse(data) as TypingIndicator
+        const updatedAt = new Date(indicator.updated_at).getTime()
+        
+        // Remove if older than 10 seconds
+        if (now - updatedAt > TYPING_EXPIRATION_SECONDS * 1000) {
+          await redis.hdel(typingKey, username)
+        } else {
+          typingUsers.push(indicator)
+        }
+      } catch (parseError) {
+        // Skip invalid entries
+        console.error(`[v0] Invalid typing data for ${username}:`, parseError)
         await redis.hdel(typingKey, username)
-      } else {
-        typingUsers.push(indicator)
       }
     }
 

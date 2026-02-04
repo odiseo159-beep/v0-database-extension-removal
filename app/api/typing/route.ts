@@ -1,15 +1,10 @@
-import { createClient } from "@supabase/supabase-js"
 import { NextRequest, NextResponse } from "next/server"
+import postgres from "postgres"
 
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!,
-  {
-    db: {
-      schema: 'public'
-    }
-  }
-)
+const sql = postgres(process.env.POSTGRES_URL_NON_POOLING || process.env.DATABASE_URL || "", {
+  ssl: { rejectUnauthorized: false },
+  max: 1,
+})
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url)
@@ -17,24 +12,20 @@ export async function GET(request: NextRequest) {
 
   try {
     // Clean up old typing indicators first (older than 10 seconds)
-    await supabaseAdmin
-      .from('typing_indicators')
-      .delete()
-      .lt('updated_at', new Date(Date.now() - 10000).toISOString())
+    await sql`
+      DELETE FROM typing_indicators
+      WHERE updated_at < NOW() - INTERVAL '10 seconds'
+    `
 
-    const { data, error } = await supabaseAdmin
-      .from('typing_indicators')
-      .select('*')
-      .eq('room', room)
+    const typingUsers = await sql`
+      SELECT id, room, username, user_color, updated_at
+      FROM typing_indicators
+      WHERE room = ${room}
+    `
 
-    if (error) {
-      console.error("Error fetching typing:", error)
-      return NextResponse.json([])
-    }
-
-    return NextResponse.json(data || [])
+    return NextResponse.json(typingUsers)
   } catch (err) {
-    console.error("Error:", err)
+    console.error("[v0] Error fetching typing:", err)
     return NextResponse.json([])
   }
 }
@@ -44,24 +35,17 @@ export async function POST(request: NextRequest) {
     const body = await request.json()
     const { room, username, user_color } = body
 
-    // Delete existing then insert new
-    await supabaseAdmin
-      .from('typing_indicators')
-      .delete()
-      .eq('room', room)
-      .eq('username', username)
-
-    const { error } = await supabaseAdmin
-      .from('typing_indicators')
-      .insert({ room, username, user_color })
-
-    if (error) {
-      console.error("Error updating typing:", error)
-    }
+    // Upsert typing indicator
+    await sql`
+      INSERT INTO typing_indicators (room, username, user_color, updated_at)
+      VALUES (${room}, ${username}, ${user_color}, NOW())
+      ON CONFLICT (room, username)
+      DO UPDATE SET updated_at = NOW(), user_color = ${user_color}
+    `
 
     return NextResponse.json({ success: true })
   } catch (err) {
-    console.error("Error:", err)
+    console.error("[v0] Error updating typing:", err)
     return NextResponse.json({ error: "Failed" }, { status: 500 })
   }
 }
@@ -76,15 +60,14 @@ export async function DELETE(request: NextRequest) {
   }
 
   try {
-    await supabaseAdmin
-      .from('typing_indicators')
-      .delete()
-      .eq('room', room)
-      .eq('username', username)
+    await sql`
+      DELETE FROM typing_indicators
+      WHERE room = ${room} AND username = ${username}
+    `
 
     return NextResponse.json({ success: true })
   } catch (err) {
-    console.error("Error:", err)
+    console.error("[v0] Error:", err)
     return NextResponse.json({ error: "Failed" }, { status: 500 })
   }
 }

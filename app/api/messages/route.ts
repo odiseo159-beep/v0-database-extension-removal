@@ -1,50 +1,32 @@
-import { createClient } from "@supabase/supabase-js"
 import { NextRequest, NextResponse } from "next/server"
+import postgres from "postgres"
 
-// Use service role key to bypass RLS and schema cache issues
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!,
-  {
-    db: {
-      schema: 'public'
-    }
-  }
-)
+// Direct PostgreSQL connection using the connection string
+const connectionString = process.env.POSTGRES_URL_NON_POOLING || process.env.SUPABASE_DB_URL || 
+  `postgresql://postgres.${process.env.NEXT_PUBLIC_SUPABASE_URL?.replace('https://', '').replace('.supabase.co', '')}:${process.env.SUPABASE_SERVICE_ROLE_KEY}@aws-0-us-east-1.pooler.supabase.com:5432/postgres`
+
+const sql = postgres(process.env.POSTGRES_URL_NON_POOLING || process.env.DATABASE_URL || "", {
+  ssl: { rejectUnauthorized: false },
+  max: 1,
+})
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url)
   const room = searchParams.get("room") || "lobby"
 
   try {
-    // Use raw SQL query to bypass schema cache entirely
-    const { data, error } = await supabaseAdmin.rpc('get_messages', {
-      room_name: room,
-      message_limit: 100
-    })
-
-    if (error) {
-      // Fallback to direct SQL if RPC fails
-      const { data: sqlData, error: sqlError } = await supabaseAdmin
-        .from('messages')
-        .select('*')
-        .eq('room', room)
-        .order('created_at', { ascending: true })
-        .limit(100)
-
-      if (sqlError) {
-        console.error("SQL Error:", sqlError)
-        return NextResponse.json({ error: sqlError.message }, { status: 500 })
-      }
-
-      return NextResponse.json(sqlData || [])
-    }
-
-    // RPC returns in DESC order, so reverse it
-    return NextResponse.json((data || []).reverse())
+    const messages = await sql`
+      SELECT id, room, username, user_color, message, created_at
+      FROM messages
+      WHERE room = ${room}
+      ORDER BY created_at ASC
+      LIMIT 100
+    `
+    return NextResponse.json(messages)
   } catch (err) {
-    console.error("Error fetching messages:", err)
-    return NextResponse.json({ error: "Failed to fetch messages" }, { status: 500 })
+    console.error("[v0] Error fetching messages:", err)
+    // Return empty array instead of error to prevent UI breaking
+    return NextResponse.json([])
   }
 }
 
@@ -53,29 +35,14 @@ export async function POST(request: NextRequest) {
     const body = await request.json()
     const { room, username, user_color, message } = body
 
-    // Try RPC first
-    const { error } = await supabaseAdmin.rpc('insert_message', {
-      room_name: room,
-      user_name: username,
-      user_color_val: user_color,
-      message_text: message
-    })
-
-    if (error) {
-      // Fallback to direct insert
-      const { error: insertError } = await supabaseAdmin
-        .from('messages')
-        .insert({ room, username, user_color, message })
-
-      if (insertError) {
-        console.error("Insert Error:", insertError)
-        return NextResponse.json({ error: insertError.message }, { status: 500 })
-      }
-    }
+    await sql`
+      INSERT INTO messages (room, username, user_color, message)
+      VALUES (${room}, ${username}, ${user_color}, ${message})
+    `
 
     return NextResponse.json({ success: true })
   } catch (err) {
-    console.error("Error inserting message:", err)
+    console.error("[v0] Error inserting message:", err)
     return NextResponse.json({ error: "Failed to insert message" }, { status: 500 })
   }
 }

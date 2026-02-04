@@ -1,9 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!
-
-// In-memory storage as fallback
+// Simple in-memory storage for typing indicators
 interface TypingIndicator {
   id: string
   room: string
@@ -12,50 +9,17 @@ interface TypingIndicator {
   updated_at: string
 }
 
-const inMemoryTyping: Map<string, TypingIndicator> = new Map()
+// Global in-memory store for typing indicators
+const typingStore: Map<string, TypingIndicator> = new Map()
 
-function cleanOldTyping() {
+function cleanOldTypingIndicators(): void {
   const tenSecondsAgo = Date.now() - 10000
-  for (const [key, indicator] of inMemoryTyping.entries()) {
-    if (new Date(indicator.updated_at).getTime() < tenSecondsAgo) {
-      inMemoryTyping.delete(key)
+  
+  for (const [key, indicator] of typingStore.entries()) {
+    const updatedAt = new Date(indicator.updated_at).getTime()
+    if (updatedAt < tenSecondsAgo) {
+      typingStore.delete(key)
     }
-  }
-}
-
-async function tryGetTyping(room: string): Promise<TypingIndicator[] | null> {
-  // Skip database entirely if service key is not available
-  if (!SUPABASE_SERVICE_KEY || !SUPABASE_URL) {
-    return null
-  }
-
-  try {
-    const res = await fetch(
-      `${SUPABASE_URL}/rest/v1/typing_indicators?room=eq.${encodeURIComponent(room)}`,
-      {
-        headers: {
-          apikey: SUPABASE_SERVICE_KEY,
-          Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
-          "Content-Type": "application/json",
-        },
-        cache: "no-store",
-      }
-    )
-
-    // Any non-2xx response means DB not ready, use fallback
-    if (!res.ok) {
-      return null
-    }
-
-    const data = await res.json()
-    // Check if response is actually an error object
-    if (data && data.code) {
-      return null
-    }
-
-    return data
-  } catch {
-    return null
   }
 }
 
@@ -63,94 +27,53 @@ export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url)
   const room = searchParams.get("room") || "lobby"
 
-  // Try database first
-  const dbTyping = await tryGetTyping(room)
-  if (dbTyping !== null) {
-    return NextResponse.json(dbTyping)
-  }
+  // Clean old typing indicators first
+  cleanOldTypingIndicators()
 
-  // Fallback to in-memory
-  cleanOldTyping()
-  const roomTyping = Array.from(inMemoryTyping.values()).filter(t => t.room === room)
-  return NextResponse.json(roomTyping)
+  // Get typing users for this room
+  const typingUsers = Array.from(typingStore.values()).filter(t => t.room === room)
+  
+  return NextResponse.json(typingUsers)
 }
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
-    const { room, username, user_color } = body
+    const { room = "lobby", username, user_color } = body
 
-    // Try database
-    try {
-      await fetch(
-        `${SUPABASE_URL}/rest/v1/typing_indicators?room=eq.${encodeURIComponent(room)}&username=eq.${encodeURIComponent(username)}`,
-        {
-          method: "DELETE",
-          headers: {
-            apikey: SUPABASE_SERVICE_KEY,
-            Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
-          },
-        }
-      )
-
-      await fetch(`${SUPABASE_URL}/rest/v1/typing_indicators`, {
-        method: "POST",
-        headers: {
-          apikey: SUPABASE_SERVICE_KEY,
-          Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
-          "Content-Type": "application/json",
-          Prefer: "return=minimal",
-        },
-        body: JSON.stringify({ room, username, user_color }),
-      })
-    } catch {
-      // Ignore database errors
+    if (!username) {
+      return NextResponse.json({ error: "Missing username" }, { status: 400 })
     }
 
-    // Always update in-memory as backup
     const key = `${room}:${username}`
-    inMemoryTyping.set(key, {
-      id: crypto.randomUUID(),
+    
+    const indicator: TypingIndicator = {
+      id: `typing_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       room,
       username,
-      user_color,
+      user_color: user_color || "#000000",
       updated_at: new Date().toISOString(),
-    })
+    }
+
+    typingStore.set(key, indicator)
 
     return NextResponse.json({ success: true })
-  } catch {
-    return NextResponse.json({ error: "Failed" }, { status: 500 })
+  } catch (error) {
+    return NextResponse.json({ error: "Failed to update typing" }, { status: 500 })
   }
 }
 
 export async function DELETE(request: NextRequest) {
   const { searchParams } = new URL(request.url)
-  const room = searchParams.get("room")
+  const room = searchParams.get("room") || "lobby"
   const username = searchParams.get("username")
 
-  if (!room || !username) {
-    return NextResponse.json({ error: "Missing params" }, { status: 400 })
+  if (!username) {
+    return NextResponse.json({ error: "Missing username" }, { status: 400 })
   }
 
-  // Try database
-  try {
-    await fetch(
-      `${SUPABASE_URL}/rest/v1/typing_indicators?room=eq.${encodeURIComponent(room)}&username=eq.${encodeURIComponent(username)}`,
-      {
-        method: "DELETE",
-        headers: {
-          apikey: SUPABASE_SERVICE_KEY,
-          Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
-        },
-      }
-    )
-  } catch {
-    // Ignore database errors
-  }
-
-  // Always update in-memory
   const key = `${room}:${username}`
-  inMemoryTyping.delete(key)
+  typingStore.delete(key)
 
   return NextResponse.json({ success: true })
 }

@@ -7,7 +7,7 @@ import Image from "next/image"
 import { Modal } from "@/components/modal"
 import { EmojiPicker } from "@/components/emoji-picker"
 import { useToast } from "@/hooks/use-toast"
-import { createClient } from "@/lib/supabase/client"
+// No database dependencies - using in-memory storage via API routes
 
 interface Message {
   id: string
@@ -134,7 +134,6 @@ function replaceEmojiShortcuts(text: string): string {
 }
 
 export default function ForssengerPage() {
-  const supabase = createClient()
   const [activeContact, setActiveContact] = useState<number | null>(null)
   const [message, setMessage] = useState("")
   const [messages, setMessages] = useState<Message[]>([])
@@ -174,33 +173,27 @@ export default function ForssengerPage() {
     fetchMessages()
   }, [username, currentRoom])
 
-  // Subscribe to new messages
+  // Poll for new messages every 2 seconds
   useEffect(() => {
     if (!username) return
 
-    const channel = supabase
-      .channel(`room:${currentRoom}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "messages",
-          filter: `room=eq.${currentRoom}`,
-        },
-        (payload) => {
-          const newMessage = payload.new as Message
-          setMessages((prev) => [...prev, newMessage])
-        }
-      )
-      .subscribe()
+    const pollMessages = async () => {
+      try {
+        const data = await fetchMessagesAPI(currentRoom)
+        setMessages(data)
+      } catch (error) {
+        // Silently ignore polling errors
+      }
+    }
+
+    const interval = setInterval(pollMessages, 2000)
 
     return () => {
-      supabase.removeChannel(channel)
+      clearInterval(interval)
     }
   }, [username, currentRoom])
 
-  // Subscribe to typing indicators
+  // Poll for typing indicators every 3 seconds
   useEffect(() => {
     if (!username) return
 
@@ -209,30 +202,15 @@ export default function ForssengerPage() {
         const data = await fetchTypingUsersAPI(currentRoom)
         setTypingUsers(data.filter((t) => t.username !== username))
       } catch (error) {
-        console.error("Error fetching typing users:", error)
+        // Silently ignore polling errors
       }
     }
 
     fetchTypingUsers()
-
-    const channel = supabase
-      .channel(`typing:${currentRoom}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "typing_indicators",
-          filter: `room=eq.${currentRoom}`,
-        },
-        () => {
-          fetchTypingUsers()
-        }
-      )
-      .subscribe()
+    const interval = setInterval(fetchTypingUsers, 3000)
 
     return () => {
-      supabase.removeChannel(channel)
+      clearInterval(interval)
     }
   }, [username, currentRoom])
 

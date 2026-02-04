@@ -7,7 +7,9 @@ import Image from "next/image"
 import { Modal } from "@/components/modal"
 import { EmojiPicker } from "@/components/emoji-picker"
 import { useToast } from "@/hooks/use-toast"
-import { supabase, type Message, type TypingIndicator } from "@/lib/supabase/client"
+import { createClient, type Message, type TypingIndicator } from "@/lib/supabase/client"
+
+const supabase = createClient()
 
 const EMOJI_SHORTCUTS: Record<string, string> = {
   ":rocket:": "🚀",
@@ -75,6 +77,8 @@ function replaceEmojiShortcuts(text: string): string {
 }
 
 export default function ForssengerPage() {
+  const supabase = createClient()
+  const [activeContact, setActiveContact] = useState<number | null>(null)
   const [message, setMessage] = useState("")
   const [messages, setMessages] = useState<Message[]>([])
   const [currentRoom, setCurrentRoom] = useState("lobby")

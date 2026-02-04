@@ -7,9 +7,115 @@ import Image from "next/image"
 import { Modal } from "@/components/modal"
 import { EmojiPicker } from "@/components/emoji-picker"
 import { useToast } from "@/hooks/use-toast"
-import { createClient, type Message, type TypingIndicator } from "@/lib/supabase/client"
+import { createClient } from "@/lib/supabase/client"
 
-const supabase = createClient()
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
+const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+
+interface Message {
+  id: string
+  room: string
+  username: string
+  user_color: string
+  message: string
+  created_at: string
+}
+
+interface TypingIndicator {
+  id: string
+  room: string
+  username: string
+  user_color: string
+  updated_at: string
+}
+
+// Helper functions for direct REST API calls (bypasses schema cache)
+async function fetchMessagesAPI(room: string): Promise<Message[]> {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/messages?room=eq.${room}&order=created_at.asc&limit=100`,
+    {
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      },
+    }
+  )
+  if (!res.ok) throw new Error("Failed to fetch messages")
+  return res.json()
+}
+
+async function insertMessageAPI(room: string, username: string, userColor: string, message: string): Promise<void> {
+  await fetch(`${SUPABASE_URL}/rest/v1/messages`, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      "Content-Type": "application/json",
+      Prefer: "return=minimal",
+    },
+    body: JSON.stringify({
+      room,
+      username,
+      user_color: userColor,
+      message,
+    }),
+  })
+}
+
+async function updateTypingAPI(room: string, username: string, userColor: string): Promise<void> {
+  // First try to delete existing, then insert new
+  await fetch(
+    `${SUPABASE_URL}/rest/v1/typing_indicators?room=eq.${room}&username=eq.${username}`,
+    {
+      method: "DELETE",
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      },
+    }
+  )
+  await fetch(`${SUPABASE_URL}/rest/v1/typing_indicators`, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      "Content-Type": "application/json",
+      Prefer: "return=minimal",
+    },
+    body: JSON.stringify({
+      room,
+      username,
+      user_color: userColor,
+    }),
+  })
+}
+
+async function removeTypingAPI(room: string, username: string): Promise<void> {
+  await fetch(
+    `${SUPABASE_URL}/rest/v1/typing_indicators?room=eq.${room}&username=eq.${username}`,
+    {
+      method: "DELETE",
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      },
+    }
+  )
+}
+
+async function fetchTypingUsersAPI(room: string): Promise<TypingIndicator[]> {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/typing_indicators?room=eq.${room}`,
+    {
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      },
+    }
+  )
+  if (!res.ok) return []
+  return res.json()
+}
 
 const EMOJI_SHORTCUTS: Record<string, string> = {
   ":rocket:": "🚀",
@@ -105,22 +211,14 @@ export default function ForssengerPage() {
   useEffect(() => {
     if (!username) return
 
-  const fetchMessages = async () => {
-    const { data, error } = await supabase
-      .rpc("get_messages", {
-        room_name: currentRoom,
-        message_limit: 100
-      })
-
-    if (error) {
-      console.error("Error fetching messages:", error)
-      return
+    const fetchMessages = async () => {
+      try {
+        const data = await fetchMessagesAPI(currentRoom)
+        setMessages(data)
+      } catch (error) {
+        console.error("Error fetching messages:", error)
+      }
     }
-
-    if (data) {
-      setMessages(data.reverse())
-    }
-  }
 
     fetchMessages()
   }, [username, currentRoom])
@@ -156,13 +254,11 @@ export default function ForssengerPage() {
     if (!username) return
 
     const fetchTypingUsers = async () => {
-      const { data } = await supabase
-        .rpc("get_typing_users", {
-          room_name: currentRoom
-        })
-
-      if (data) {
+      try {
+        const data = await fetchTypingUsersAPI(currentRoom)
         setTypingUsers(data.filter((t) => t.username !== username))
+      } catch (error) {
+        console.error("Error fetching typing users:", error)
       }
     }
 
@@ -198,21 +294,14 @@ export default function ForssengerPage() {
   const updateTypingIndicator = useCallback(async () => {
     if (!username) return
 
-    await supabase.rpc("update_typing", {
-      room_name: currentRoom,
-      user_name: username,
-      user_color_val: userColor,
-    })
+    await updateTypingAPI(currentRoom, username, userColor)
 
     if (typingTimeoutRef.current) {
       clearTimeout(typingTimeoutRef.current)
     }
 
     typingTimeoutRef.current = setTimeout(async () => {
-      await supabase.rpc("remove_typing", {
-        room_name: currentRoom,
-        user_name: username
-      })
+      await removeTypingAPI(currentRoom, username)
     }, 3000)
   }, [username, currentRoom, userColor])
 
@@ -221,18 +310,10 @@ export default function ForssengerPage() {
 
     const processedMessage = replaceEmojiShortcuts(filterProfanity(message.trim()))
 
-    await supabase.rpc("insert_message", {
-      room_name: currentRoom,
-      user_name: username,
-      user_color_val: userColor,
-      message_text: processedMessage,
-    })
+    await insertMessageAPI(currentRoom, username, userColor, processedMessage)
 
     // Remove typing indicator
-    await supabase.rpc("remove_typing", {
-      room_name: currentRoom,
-      user_name: username
-    })
+    await removeTypingAPI(currentRoom, username)
 
     setMessage("")
     if (typingTimeoutRef.current) {

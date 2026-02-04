@@ -105,23 +105,22 @@ export default function ForssengerPage() {
   useEffect(() => {
     if (!username) return
 
-    const fetchMessages = async () => {
-      const { data, error } = await supabase
-        .from("messages")
-        .select("*")
-        .eq("room", currentRoom)
-        .order("created_at", { ascending: true })
-        .limit(100)
+  const fetchMessages = async () => {
+    const { data, error } = await supabase
+      .rpc("get_messages", {
+        room_name: currentRoom,
+        message_limit: 100
+      })
 
-      if (error) {
-        console.error("Error fetching messages:", error)
-        return
-      }
-
-      if (data) {
-        setMessages(data)
-      }
+    if (error) {
+      console.error("Error fetching messages:", error)
+      return
     }
+
+    if (data) {
+      setMessages(data.reverse())
+    }
+  }
 
     fetchMessages()
   }, [username, currentRoom])
@@ -158,13 +157,12 @@ export default function ForssengerPage() {
 
     const fetchTypingUsers = async () => {
       const { data } = await supabase
-        .from("typing_indicators")
-        .select("*")
-        .eq("room", currentRoom)
-        .neq("username", username)
+        .rpc("get_typing_users", {
+          room_name: currentRoom
+        })
 
       if (data) {
-        setTypingUsers(data)
+        setTypingUsers(data.filter((t) => t.username !== username))
       }
     }
 
@@ -200,24 +198,21 @@ export default function ForssengerPage() {
   const updateTypingIndicator = useCallback(async () => {
     if (!username) return
 
-    await supabase.from("typing_indicators").upsert(
-      {
-        room: currentRoom,
-        username,
-        user_color: userColor,
-        updated_at: new Date().toISOString(),
-      },
-      {
-        onConflict: "room,username",
-      }
-    )
+    await supabase.rpc("update_typing", {
+      room_name: currentRoom,
+      user_name: username,
+      user_color_val: userColor,
+    })
 
     if (typingTimeoutRef.current) {
       clearTimeout(typingTimeoutRef.current)
     }
 
     typingTimeoutRef.current = setTimeout(async () => {
-      await supabase.from("typing_indicators").delete().eq("room", currentRoom).eq("username", username)
+      await supabase.rpc("remove_typing", {
+        room_name: currentRoom,
+        user_name: username
+      })
     }, 3000)
   }, [username, currentRoom, userColor])
 
@@ -226,15 +221,18 @@ export default function ForssengerPage() {
 
     const processedMessage = replaceEmojiShortcuts(filterProfanity(message.trim()))
 
-    await supabase.from("messages").insert({
-      room: currentRoom,
-      username,
-      user_color: userColor,
-      message: processedMessage,
+    await supabase.rpc("insert_message", {
+      room_name: currentRoom,
+      user_name: username,
+      user_color_val: userColor,
+      message_text: processedMessage,
     })
 
     // Remove typing indicator
-    await supabase.from("typing_indicators").delete().eq("room", currentRoom).eq("username", username)
+    await supabase.rpc("remove_typing", {
+      room_name: currentRoom,
+      user_name: username
+    })
 
     setMessage("")
     if (typingTimeoutRef.current) {

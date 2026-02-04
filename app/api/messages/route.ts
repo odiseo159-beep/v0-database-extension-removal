@@ -13,6 +13,10 @@ interface Message {
 // Global in-memory store
 const messagesStore: Map<string, Message[]> = new Map()
 
+// Rate limiting: track last message time per user
+const userLastMessage: Map<string, number> = new Map()
+const RATE_LIMIT_MS = 10000 // 10 seconds
+
 function getMessagesForRoom(room: string): Message[] {
   if (!messagesStore.has(room)) {
     messagesStore.set(room, [])
@@ -40,6 +44,23 @@ export async function POST(request: NextRequest) {
     if (!username || !message) {
       return NextResponse.json({ error: "Missing required fields" }, { status: 400 })
     }
+
+    // Check rate limit
+    const userKey = `${room}:${username}`
+    const lastMessageTime = userLastMessage.get(userKey) || 0
+    const now = Date.now()
+    const timeSinceLastMessage = now - lastMessageTime
+
+    if (timeSinceLastMessage < RATE_LIMIT_MS) {
+      const waitTime = Math.ceil((RATE_LIMIT_MS - timeSinceLastMessage) / 1000)
+      return NextResponse.json(
+        { error: `Espera ${waitTime} segundos antes de enviar otro mensaje`, waitTime },
+        { status: 429 }
+      )
+    }
+
+    // Update last message time
+    userLastMessage.set(userKey, now)
 
     const newMessage: Message = {
       id: `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,

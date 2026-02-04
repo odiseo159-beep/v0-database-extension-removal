@@ -148,6 +148,8 @@ export default function ForssengerPage() {
   const { toast } = useToast()
   const [showUsernameModal, setShowUsernameModal] = useState(true)
   const [tempUsername, setTempUsername] = useState("")
+  const [rateLimitSeconds, setRateLimitSeconds] = useState(0)
+  const rateLimitIntervalRef = useRef<NodeJS.Timeout>()
 
   // Generate random username and color on mount
   useEffect(() => {
@@ -235,18 +237,72 @@ export default function ForssengerPage() {
   }, [username, currentRoom, userColor])
 
   const handleSendMessage = async () => {
-    if (!message.trim() || !username) return
+    if (!message.trim() || !username || rateLimitSeconds > 0) return
 
     const processedMessage = replaceEmojiShortcuts(filterProfanity(message.trim()))
 
-    await insertMessageAPI(currentRoom, username, userColor, processedMessage)
+    try {
+      const res = await fetch("/api/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ room: currentRoom, username, user_color: userColor, message: processedMessage }),
+      })
 
-    // Remove typing indicator
-    await removeTypingAPI(currentRoom, username)
+      if (!res.ok) {
+        const err = await res.json()
+        if (res.status === 429 && err.waitTime) {
+          // Rate limited - start countdown
+          setRateLimitSeconds(err.waitTime)
+          if (rateLimitIntervalRef.current) {
+            clearInterval(rateLimitIntervalRef.current)
+          }
+          rateLimitIntervalRef.current = setInterval(() => {
+            setRateLimitSeconds((prev) => {
+              if (prev <= 1) {
+                clearInterval(rateLimitIntervalRef.current)
+                return 0
+              }
+              return prev - 1
+            })
+          }, 1000)
+          toast({
+            title: "Rate limit",
+            description: err.error,
+            variant: "destructive",
+          })
+          return
+        }
+        throw new Error(err.error || "Failed to send message")
+      }
 
-    setMessage("")
-    if (typingTimeoutRef.current) {
-      clearTimeout(typingTimeoutRef.current)
+      // Successfully sent - start 10 second cooldown
+      setRateLimitSeconds(10)
+      if (rateLimitIntervalRef.current) {
+        clearInterval(rateLimitIntervalRef.current)
+      }
+      rateLimitIntervalRef.current = setInterval(() => {
+        setRateLimitSeconds((prev) => {
+          if (prev <= 1) {
+            clearInterval(rateLimitIntervalRef.current)
+            return 0
+          }
+          return prev - 1
+        })
+      }, 1000)
+
+      // Remove typing indicator
+      await removeTypingAPI(currentRoom, username)
+
+      setMessage("")
+      if (typingTimeoutRef.current) {
+        clearTimeout(typingTimeoutRef.current)
+      }
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "No se pudo enviar el mensaje",
+        variant: "destructive",
+      })
     }
   }
 
@@ -728,18 +784,20 @@ export default function ForssengerPage() {
             />
             <button
               onClick={handleSendMessage}
-              disabled={!message.trim()}
+              disabled={!message.trim() || rateLimitSeconds > 0}
               className="rounded px-4 py-2 text-sm font-semibold text-white transition-opacity disabled:opacity-50"
               style={{
-                background: "var(--msn-blue-500)",
+                background: rateLimitSeconds > 0 ? "#6b7280" : "var(--msn-blue-500)",
               }}
             >
-              {"Send"}
+              {rateLimitSeconds > 0 ? `Espera ${rateLimitSeconds}s` : "Send"}
             </button>
           </div>
 
           <div className="mt-2 text-xs" style={{ color: "var(--text-muted)" }}>
-            {"Tip: Use :emoji: shortcuts like :rocket: :fire: :heart:"}
+            {rateLimitSeconds > 0
+              ? `Puedes enviar otro mensaje en ${rateLimitSeconds} segundos`
+              : "Tip: Use :emoji: shortcuts like :rocket: :fire: :heart:"}
           </div>
         </div>
       </div>

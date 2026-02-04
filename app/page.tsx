@@ -575,6 +575,35 @@ export default function ForssengerPage() {
               </div>
             </div>
           </div>
+          
+          {/* Contract Address */}
+          <div className="flex-1 mx-4 hidden md:flex items-center justify-center">
+            <div 
+              className="px-4 py-1.5 rounded-full border flex items-center gap-2 max-w-md"
+              style={{
+                background: "linear-gradient(to right, #f0fdf4, #ecfdf5)",
+                borderColor: "var(--msn-border)",
+              }}
+            >
+              <span className="text-xs font-mono truncate" style={{ color: "var(--text-primary)" }}>
+                CA: 0x1234...5678
+              </span>
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText("0x1234567890abcdef1234567890abcdef12345678")
+                  toast({
+                    title: "Copiado!",
+                    description: "Contrato copiado al portapapeles",
+                  })
+                }}
+                className="text-xs px-2 py-0.5 rounded transition-colors hover:bg-green-200"
+                style={{ color: "var(--text-primary)" }}
+              >
+                Copy
+              </button>
+            </div>
+          </div>
+
           <div className="flex gap-2">
             <button
               className="rounded p-2 transition-colors"

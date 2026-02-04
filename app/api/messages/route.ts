@@ -1,6 +1,11 @@
+import { Redis } from "@upstash/redis"
 import { NextRequest, NextResponse } from "next/server"
 
-// Simple in-memory storage for messages
+const redis = new Redis({
+  url: process.env.KV_REST_API_URL!,
+  token: process.env.KV_REST_API_TOKEN!,
+})
+
 interface Message {
   id: string
   room: string
@@ -10,77 +15,77 @@ interface Message {
   created_at: string
 }
 
-// Global in-memory store
-const messagesStore: Map<string, Message[]> = new Map()
-
-// Rate limiting: track last message time per user
-const userLastMessage: Map<string, number> = new Map()
-const RATE_LIMIT_MS = 10000 // 10 seconds
-
-function getMessagesForRoom(room: string): Message[] {
-  if (!messagesStore.has(room)) {
-    messagesStore.set(room, [])
-  }
-  return messagesStore.get(room)!
-}
+// Rate limiting constants
+const RATE_LIMIT_SECONDS = 10
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url)
   const room = searchParams.get("room") || "lobby"
 
-  const messages = getMessagesForRoom(room)
-  
-  // Return only the last 100 messages
-  const recentMessages = messages.slice(-100)
-  
-  return NextResponse.json(recentMessages)
+  try {
+    // Get messages from Redis sorted set
+    const messages = await redis.zrange<Message[]>(`messages:${room}`, 0, 99, {
+      rev: true,
+    })
+
+    // Reverse to get chronological order
+    return NextResponse.json(messages.reverse())
+  } catch (error) {
+    console.error("[v0] Error fetching messages:", error)
+    return NextResponse.json([])
+  }
 }
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
-    const { room = "lobby", username, user_color, message } = body
+    const { room, username, user_color, message } = body
 
     if (!username || !message) {
       return NextResponse.json({ error: "Missing required fields" }, { status: 400 })
     }
 
     // Check rate limit
-    const userKey = `${room}:${username}`
-    const lastMessageTime = userLastMessage.get(userKey) || 0
+    const rateLimitKey = `ratelimit:${room}:${username}`
+    const lastMessageTime = await redis.get<number>(rateLimitKey)
     const now = Date.now()
-    const timeSinceLastMessage = now - lastMessageTime
 
-    if (timeSinceLastMessage < RATE_LIMIT_MS) {
-      const waitTime = Math.ceil((RATE_LIMIT_MS - timeSinceLastMessage) / 1000)
-      return NextResponse.json(
-        { error: `Espera ${waitTime} segundos antes de enviar otro mensaje`, waitTime },
-        { status: 429 }
-      )
+    if (lastMessageTime) {
+      const timeSinceLastMessage = now - lastMessageTime
+      if (timeSinceLastMessage < RATE_LIMIT_SECONDS * 1000) {
+        const waitTime = Math.ceil((RATE_LIMIT_SECONDS * 1000 - timeSinceLastMessage) / 1000)
+        return NextResponse.json(
+          { error: `Espera ${waitTime} segundos antes de enviar otro mensaje`, waitTime },
+          { status: 429 }
+        )
+      }
     }
 
-    // Update last message time
-    userLastMessage.set(userKey, now)
-
+    // Create message
     const newMessage: Message = {
-      id: `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      id: crypto.randomUUID(),
       room,
       username,
-      user_color: user_color || "#000000",
+      user_color,
       message,
       created_at: new Date().toISOString(),
     }
 
-    const messages = getMessagesForRoom(room)
-    messages.push(newMessage)
+    // Store message in sorted set with timestamp as score
+    await redis.zadd(`messages:${room}`, {
+      score: now,
+      member: JSON.stringify(newMessage),
+    })
 
-    // Keep only the last 500 messages per room to prevent memory issues
-    if (messages.length > 500) {
-      messagesStore.set(room, messages.slice(-500))
-    }
+    // Set rate limit
+    await redis.set(rateLimitKey, now, { ex: RATE_LIMIT_SECONDS })
 
-    return NextResponse.json({ success: true, message: newMessage })
+    // Keep only last 100 messages
+    await redis.zremrangebyrank(`messages:${room}`, 0, -101)
+
+    return NextResponse.json({ success: true })
   } catch (error) {
+    console.error("[v0] Error inserting message:", error)
     return NextResponse.json({ error: "Failed to insert message" }, { status: 500 })
   }
 }

@@ -1,6 +1,11 @@
+import { Redis } from "@upstash/redis"
 import { NextRequest, NextResponse } from "next/server"
 
-// Simple in-memory storage for typing indicators
+const redis = new Redis({
+  url: process.env.KV_REST_API_URL!,
+  token: process.env.KV_REST_API_TOKEN!,
+})
+
 interface TypingIndicator {
   id: string
   room: string
@@ -9,71 +14,90 @@ interface TypingIndicator {
   updated_at: string
 }
 
-// Global in-memory store for typing indicators
-const typingStore: Map<string, TypingIndicator> = new Map()
-
-function cleanOldTypingIndicators(): void {
-  const tenSecondsAgo = Date.now() - 10000
-  
-  for (const [key, indicator] of typingStore.entries()) {
-    const updatedAt = new Date(indicator.updated_at).getTime()
-    if (updatedAt < tenSecondsAgo) {
-      typingStore.delete(key)
-    }
-  }
-}
+const TYPING_EXPIRATION_SECONDS = 10
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url)
   const room = searchParams.get("room") || "lobby"
 
-  // Clean old typing indicators first
-  cleanOldTypingIndicators()
+  try {
+    // Get all typing indicators for this room
+    const typingKey = `typing:${room}`
+    const typingData = await redis.hgetall<Record<string, string>>(typingKey)
 
-  // Get typing users for this room
-  const typingUsers = Array.from(typingStore.values()).filter(t => t.room === room)
-  
-  return NextResponse.json(typingUsers)
+    if (!typingData) {
+      return NextResponse.json([])
+    }
+
+    // Convert to array and filter expired ones
+    const now = Date.now()
+    const typingUsers: TypingIndicator[] = []
+
+    for (const [username, data] of Object.entries(typingData)) {
+      const indicator = JSON.parse(data) as TypingIndicator
+      const updatedAt = new Date(indicator.updated_at).getTime()
+      
+      // Remove if older than 10 seconds
+      if (now - updatedAt > TYPING_EXPIRATION_SECONDS * 1000) {
+        await redis.hdel(typingKey, username)
+      } else {
+        typingUsers.push(indicator)
+      }
+    }
+
+    return NextResponse.json(typingUsers)
+  } catch (error) {
+    console.error("[v0] Error fetching typing:", error)
+    return NextResponse.json([])
+  }
 }
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
-    const { room = "lobby", username, user_color } = body
+    const { room, username, user_color } = body
 
     if (!username) {
       return NextResponse.json({ error: "Missing username" }, { status: 400 })
     }
 
-    const key = `${room}:${username}`
-    
-    const indicator: TypingIndicator = {
-      id: `typing_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+    const typingIndicator: TypingIndicator = {
+      id: crypto.randomUUID(),
       room,
       username,
-      user_color: user_color || "#000000",
+      user_color,
       updated_at: new Date().toISOString(),
     }
 
-    typingStore.set(key, indicator)
+    // Store in hash with username as field
+    await redis.hset(`typing:${room}`, {
+      [username]: JSON.stringify(typingIndicator),
+    })
+
+    // Set expiration on the entire hash
+    await redis.expire(`typing:${room}`, TYPING_EXPIRATION_SECONDS * 2)
 
     return NextResponse.json({ success: true })
   } catch (error) {
-    return NextResponse.json({ error: "Failed to update typing" }, { status: 500 })
+    console.error("[v0] Error updating typing:", error)
+    return NextResponse.json({ error: "Failed" }, { status: 500 })
   }
 }
 
 export async function DELETE(request: NextRequest) {
   const { searchParams } = new URL(request.url)
-  const room = searchParams.get("room") || "lobby"
+  const room = searchParams.get("room")
   const username = searchParams.get("username")
 
-  if (!username) {
-    return NextResponse.json({ error: "Missing username" }, { status: 400 })
+  if (!room || !username) {
+    return NextResponse.json({ error: "Missing params" }, { status: 400 })
   }
 
-  const key = `${room}:${username}`
-  typingStore.delete(key)
-
-  return NextResponse.json({ success: true })
+  try {
+    await redis.hdel(`typing:${room}`, username)
+    return NextResponse.json({ success: true })
+  } catch (error) {
+    console.error("[v0] Error removing typing:", error)
+    return NextResponse.json({ error: "Failed" }, { status: 500 })
+  }
 }

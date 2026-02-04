@@ -9,9 +9,6 @@ import { EmojiPicker } from "@/components/emoji-picker"
 import { useToast } from "@/hooks/use-toast"
 import { createClient } from "@/lib/supabase/client"
 
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-
 interface Message {
   id: string
   room: string
@@ -29,90 +26,44 @@ interface TypingIndicator {
   updated_at: string
 }
 
-// Helper functions for direct REST API calls (bypasses schema cache)
+// API functions using Next.js API routes (bypasses schema cache completely)
 async function fetchMessagesAPI(room: string): Promise<Message[]> {
-  const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/messages?room=eq.${room}&order=created_at.asc&limit=100`,
-    {
-      headers: {
-        apikey: SUPABASE_ANON_KEY,
-        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-      },
-    }
-  )
-  if (!res.ok) throw new Error("Failed to fetch messages")
+  const res = await fetch(`/api/messages?room=${encodeURIComponent(room)}`)
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.error || "Failed to fetch messages")
+  }
   return res.json()
 }
 
 async function insertMessageAPI(room: string, username: string, userColor: string, message: string): Promise<void> {
-  await fetch(`${SUPABASE_URL}/rest/v1/messages`, {
+  const res = await fetch("/api/messages", {
     method: "POST",
-    headers: {
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-      "Content-Type": "application/json",
-      Prefer: "return=minimal",
-    },
-    body: JSON.stringify({
-      room,
-      username,
-      user_color: userColor,
-      message,
-    }),
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ room, username, user_color: userColor, message }),
   })
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.error || "Failed to send message")
+  }
 }
 
 async function updateTypingAPI(room: string, username: string, userColor: string): Promise<void> {
-  // First try to delete existing, then insert new
-  await fetch(
-    `${SUPABASE_URL}/rest/v1/typing_indicators?room=eq.${room}&username=eq.${username}`,
-    {
-      method: "DELETE",
-      headers: {
-        apikey: SUPABASE_ANON_KEY,
-        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-      },
-    }
-  )
-  await fetch(`${SUPABASE_URL}/rest/v1/typing_indicators`, {
+  await fetch("/api/typing", {
     method: "POST",
-    headers: {
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-      "Content-Type": "application/json",
-      Prefer: "return=minimal",
-    },
-    body: JSON.stringify({
-      room,
-      username,
-      user_color: userColor,
-    }),
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ room, username, user_color: userColor }),
   })
 }
 
 async function removeTypingAPI(room: string, username: string): Promise<void> {
-  await fetch(
-    `${SUPABASE_URL}/rest/v1/typing_indicators?room=eq.${room}&username=eq.${username}`,
-    {
-      method: "DELETE",
-      headers: {
-        apikey: SUPABASE_ANON_KEY,
-        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-      },
-    }
-  )
+  await fetch(`/api/typing?room=${encodeURIComponent(room)}&username=${encodeURIComponent(username)}`, {
+    method: "DELETE",
+  })
 }
 
 async function fetchTypingUsersAPI(room: string): Promise<TypingIndicator[]> {
-  const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/typing_indicators?room=eq.${room}`,
-    {
-      headers: {
-        apikey: SUPABASE_ANON_KEY,
-        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-      },
-    }
-  )
+  const res = await fetch(`/api/typing?room=${encodeURIComponent(room)}`)
   if (!res.ok) return []
   return res.json()
 }
